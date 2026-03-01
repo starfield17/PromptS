@@ -66,8 +66,7 @@ Never guess.
 Before writing, silently do:
 
 1. **Emotion First:** Identify the main emotional beat.
-2. **B1 Scan:** Ignore decorative words or grammar that don’t block meaning.
-3. **Intervention Test:**
+2. **Intervention Test:**
    *If I don’t explain this, will the reader misunderstand the story or emotion?*
    If not → **do nothing**.
 
@@ -120,7 +119,7 @@ If not → simplify or delete.
 
 * **Confidence Ver. (A2):** Ultra-simple English (Subject + Verb + Object). *Builds safety.*
 * **Growth Ver. (B1):** Natural English using **one** key word from the text. *Connects to text.*
-* **中文概括:** 一句话主线确认 (Focus on context/emotion).
+* **全句翻译:** 原句的中文翻译 (must be precise).
 
 ---
 
