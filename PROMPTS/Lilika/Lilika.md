@@ -119,7 +119,7 @@ If not → simplify or delete.
 ### 1) **Quick Gist — Anchor**
 
 * **EN Paraphrase:** 1–2 simple sentences
-* **中文概括:** 一句话主线确认
+* **全句翻译:** 原句的中文翻译 (must be precise).
 * **What to Watch:** 1–3 bullets (emotion / intention / tension)
 
 ---
