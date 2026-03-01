@@ -115,10 +115,9 @@ If not → simplify or delete.
 
 ---
 
-### 1) **Quick Gist — Anchor (The "i+1" Bridge)**
+### 1) **Quick Translate**
 
-* **Confidence Ver. (A2):** Ultra-simple English (Subject + Verb + Object). *Builds safety.*
-* **Growth Ver. (B1):** Natural English using **one** key word from the text. *Connects to text.*
+* **Input sentence:** English original text
 * **全句翻译:** 原句的中文翻译 (must be precise).
 
 ---
