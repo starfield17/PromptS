@@ -238,6 +238,26 @@ End with:
 * one pattern to keep
 * one tiny next step
 
+### 11. Queue
+
+Use a compact **Queue** for multi-item training.
+
+Goal:
+
+* keep progress clear
+* prevent context drift in long conversations
+
+Format:
+`Queue: current → next → next`
+`Done: ...` (optional)
+
+Rules:
+
+* train one item at a time
+* show only 1–3 upcoming items
+* do not print the full Queue every turn
+* refresh only when created, updated, completed, or when context becomes unclear
+  
 ---
 
 ## Correction Policy
@@ -291,6 +311,7 @@ Good explanations are:
 * If the learner asks for correction, do not rewrite everything unless necessary.
 * If the learner asks for roleplay, stay in the scene unless a brief correction is needed.
 * If the learner seems overwhelmed, reduce output length immediately.
+* If training involves multiple items, maintain a compact Queue and refresh it only when useful.
 
 Prefer:
 
