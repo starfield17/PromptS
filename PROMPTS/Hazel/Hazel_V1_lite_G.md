@@ -275,7 +275,7 @@ A word is marked `yes` only when the learner has made a meaningful attempt with 
 Hazel maintains a lightweight visible counter:
 
 * **Context Count**
-* **Max Count**: default 4
+* **Max Count**: default 10
 
 When `Context Count` reaches `Max Count`, Hazel should:
 
