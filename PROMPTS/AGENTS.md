@@ -1,79 +1,65 @@
-# Global Agent Rules
+# AGENTS.md
 
-## Language
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
-Default to English in user-facing replies unless the user explicitly requests another language.
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-## Response Style
+## 1. Think Before Coding
 
-Do not propose follow-up tasks or enhancement at the end of your final answer.
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
 
-## Debug-First Policy (No Silent Fallbacks)
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
 
-- Do **not** introduce new boundary rules / guardrails / blockers / caps (e.g. max-turns), fallback behaviors, or silent degradation **just to make it run**.
-- Do **not** add mock/simulation fake success paths (e.g. returning `(mock) ok`, templated outputs that bypass real execution, or swallowing errors).
-- Do **not** write defensive or fallback code; it does not solve the root problem and only increases debugging cost.
-- Prefer **full exposure**: let failures surface clearly (explicit errors, exceptions, logs, failing tests) so bugs are visible and can be fixed at the root cause.
-- If a boundary rule or fallback is truly necessary (security/safety/privacy, or the user explicitly requests it), it must be:
-  - explicit (never silent),
-  - documented,
-  - easy to disable,
-  - and agreed by the user beforehand.
+## 2. Simplicity First
 
-## Engineering Quality Baseline
+**Minimum code that solves the problem. Nothing speculative.**
 
-- Follow SOLID, DRY, separation of concerns, and YAGNI.
-- Use clear naming and pragmatic abstractions; add concise comments only for critical or non-obvious logic.
-- Remove dead code and obsolete compatibility paths when changing behavior, unless compatibility is explicitly required by the user.
-- Consider time/space complexity and optimize heavy IO or memory usage when relevant.
-- Handle edge cases explicitly; do not hide failures.
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
 
-## Code Metrics (Hard Limits)
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
-- **Function length**: 50 lines (excluding blanks). Exceeded  extract helper immediately.
-- **File size**: 300 lines. Exceeded  split by responsibility.
-- **Nesting depth**: 3 levels. Use early returns / guard clauses to flatten.
-- **Parameters**: 3 positional. More  use a config/options object.
-- **Cyclomatic complexity**: 10 per function. More  decompose branching logic.
-- **No magic numbers**: extract to named constants (`MAX_RETRIES = 3`, not bare `3`).
+## 3. Surgical Changes
 
-## Decoupling & Immutability
+**Touch only what you must. Clean up only your own mess.**
 
-- **Dependency injection**: business logic never `new`s or hard-imports concrete implementations; inject via parameters or interfaces.
-- **Immutable-first**: prefer `readonly`, `frozen=True`, `const`, immutable data structures. Never mutate function parameters or global state; return new values.
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
 
-## Security Baseline
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
 
-- Never hardcode secrets, API keys, or credentials in source code; use environment variables or secret managers.
-- Use parameterized queries for all database access; never concatenate user input into SQL/commands.
-- Validate and sanitize all external input (user input, API responses, file content) at system boundaries.
-- **Conversation keys  code leaks**: When the user shares an API key in conversation (e.g. configuring a provider, debugging a connection), this is normal workflow  do NOT emit "secret leaked" warnings. Only alert when a key is written into a source code file. Frontend display is already masked; no need to remind repeatedly.
+The test: Every changed line should trace directly to the user's request.
 
-## Testing and Validation
+## 4. Goal-Driven Execution
 
-- Keep code testable and verify with automated checks whenever feasible.
-- When running backend unit tests, enforce a hard timeout of 60 seconds to avoid stuck tasks.
-- Prefer static checks, formatting, and reproducible verification over ad-hoc manual confidence.
+**Define success criteria. Loop until verified.**
 
-## Skills
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
 
-Skills are stored in `~/.codex/skills/` (personal) and optionally `.codex/skills/` (project-shared).
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
 
-Before starting a task:
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
-- Scan available skills.
-- If a skill matches, read its `SKILL.md` and follow it.
-- Announce which skill(s) are being used.
-- Prefer `taskmaster` by default for any task with 3+ ordered steps that produce file changes.
+---
 
-Routing table:
-
-| Scenario | Skill | Trigger |
-|----------|-------|---------|
-| Multi-step task tracking / autonomous execution | `taskmaster` | 3+ ordered steps that produce file changes, or "track tasks", "make a plan", "track progress", "long task", "big project", "autonomous", "从零开始", "长时任务" |
-
-## Taskmaster Notes
-
-- `taskmaster` v5 supports `Single / Epic / Batch`; shape selection belongs in `SKILL.md`, not in this global file.
-- For homogeneous row-level batch work inside `taskmaster`, prefer `spawn_agents_on_csv`.
-- Keep task-tracking CSV and batch-worker CSV separated.
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
