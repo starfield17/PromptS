@@ -1,0 +1,4 @@
+id,task,status,acceptance_criteria,validation_command,completed_at,retry_count,notes
+1,Scaffold project structure,TODO,"Project dirs + config files exist","ls src/ && cat package.json",,0,
+2,Implement core module,TODO,"Core logic passes unit tests","npm test -- --grep core",,0,
+3,Add integration tests,TODO,"All integration tests pass","npm test -- --grep integration",,0,

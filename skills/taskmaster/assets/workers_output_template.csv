@@ -1,0 +1,4 @@
+id,status,summary,changed,evidence_path,error
+1,DONE,Frontmatter already valid,false,artifacts/a.json,
+2,FAILED,Missing title,false,artifacts/b.json,missing title
+3,DONE,Frontmatter fixed,true,artifacts/c.json,

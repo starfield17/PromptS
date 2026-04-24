@@ -1,0 +1,4 @@
+id,task,status,acceptance_criteria,validation_command,completed_at,retry_count,notes,metric_name,target,actual,evidence_path
+1,Capture baseline metrics,TODO,"Baseline metrics recorded and checked","test -f artifacts/baseline-latency.txt",,0,,p95_latency_ms,<=250,,artifacts/baseline-latency.txt
+2,Reduce hot-path latency,TODO,"Optimized metrics meet latency target","test -f artifacts/optimized-latency.txt",,0,,p95_latency_ms,<=200,,artifacts/optimized-latency.txt
+3,Verify load stability,TODO,"Load report shows stable error rate","test -f artifacts/load-test-report.txt",,0,,error_rate_pct,<=1,,artifacts/load-test-report.txt

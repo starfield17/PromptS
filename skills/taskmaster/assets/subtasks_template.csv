@@ -1,0 +1,4 @@
+id,task,task_type,status,depends_on,task_dir,acceptance_criteria,validation_command,completed_at,retry_count,notes
+1,Implement billing API,single-full,TODO,,tasks/20260313-api,API tests pass,pytest tests/billing_api.py,,0,
+2,Build billing UI,single-full,TODO,1,tasks/20260313-frontend,UI renders invoices,npm test -- --grep billing,,0,
+3,Update billing docs,batch,TODO,1;2,tasks/20260313-docs,All docs rows succeed,python3 scripts/validate_docs.py,,0,

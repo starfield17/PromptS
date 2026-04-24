@@ -1,0 +1,4 @@
+id,file_path,target_rule,notes
+1,docs/a.md,frontmatter-required,
+2,docs/b.md,frontmatter-required,
+3,docs/c.md,frontmatter-required,
