@@ -1,6 +1,11 @@
 ---
 name: todo-list-csv
-description: Use this skill when you need to modify a project (add/delete/modify files) and want to organically synchronize the update_plan with a CSV: create a "{Task Name} TO DO list.csv" in the project root directory, use TODO/IN_PROGRESS/DONE to drive the plan's pending/in_progress/completed, synchronize progress, and delete the file upon full completion.
+description: >
+  Use this skill when you need to modify a project (add/delete/modify files)
+  and want to organically synchronize the update_plan with a CSV: create a
+  "{Task Name} TO DO list.csv" in the project root directory, use
+  TODO/IN_PROGRESS/DONE to drive the plan's pending/in_progress/completed,
+  synchronize progress, and delete the file upon full completion.
 ---
 
 # Todo List CSV
