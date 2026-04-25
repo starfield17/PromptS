@@ -1,0 +1,7 @@
+interface:
+  display_name: "Claude Subagents"
+  short_description: "Delegate work to Claude Code"
+  default_prompt: "Use $claude-subagents to delegate this task to one or more local Claude Code workers."
+
+policy:
+  allow_implicit_invocation: true
