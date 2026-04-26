@@ -25,6 +25,7 @@
     "Glob"
   ],
   "write_scope": [],
+  "prepare_dirs": [],
   "output_schema": {
     "type": "object"
   }
@@ -42,7 +43,10 @@
 - `deliverables`: optional checklist for the final answer
 - `allowed_tools`: optional explicit Claude tool list; defaults depend on `role`
 - `write_scope`: required for `worker`; soft guard expressed in the injected prompt
+- `prepare_dirs`: optional extra directories to create before a `worker` run starts
 - `output_schema`: optional JSON Schema forwarded to Claude for structured output
+
+For `worker` tasks, both `write_scope` and `prepare_dirs` must stay within `cwd` after path resolution.
 
 ## Default Tool Policies
 
@@ -52,6 +56,8 @@ If `allowed_tools` is omitted:
 - `worker` defaults to `Read`, `Grep`, `Glob`, `Edit`, `Write`
 
 If Codex wants shell access, it must request it explicitly in `allowed_tools`.
+
+Even when shell access is allowed, prefer `Write` and `Edit` for file creation. The wrapper creates parent directories implied by `write_scope` before launching Claude.
 
 ## Example: Reader
 
@@ -95,9 +101,14 @@ If Codex wants shell access, it must request it explicitly in `allowed_tools`.
     "Short changed-files summary",
     "Any residual risk or blocker"
   ],
+  "prepare_dirs": [
+    "src/generated"
+  ],
   "write_scope": [
     "src/parser.ts",
     "tests/parser.test.ts"
   ]
 }
 ```
+
+In this example, the wrapper creates `src/` from `write_scope` automatically and also prepares `src/generated/` because it was listed explicitly in `prepare_dirs`.

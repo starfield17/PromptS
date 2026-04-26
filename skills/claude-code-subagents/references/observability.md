@@ -21,9 +21,12 @@ Each run writes a dedicated artifact directory under:
 Use `ops.jsonl` for normal collaboration. It contains high-signal JSONL events such as:
 
 - `run_started`
+- `prepared_dirs`
 - `status`
 - `tool_use`
 - `tool_result`
+- `permission_denial`
+- `structured_result`
 - `assistant_text`
 - `result`
 - `run_finished`
@@ -32,7 +35,7 @@ Use `raw.stream.jsonl` only when Codex needs full event fidelity, including raw 
 
 ## Summary Shape
 
-`summary.json` includes the run status, duration, model, session id, tool calls, costs, permission denials, and final result. If `output_schema` was provided and Claude returned valid JSON, `structured_result` is also populated.
+`summary.json` includes the run status, duration, model, session id, tool calls, costs, permission denials, and final result. If Claude emits a `StructuredOutput` tool call, that payload is stored directly in `structured_result`. When no such tool call exists, the wrapper falls back to parsing the final textual result as JSON only when `output_schema` was provided.
 
 ## Typical Codex Loop
 

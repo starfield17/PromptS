@@ -72,6 +72,8 @@ Keep each task contract small and decision-complete.
 
 If a task needs structured output, set `output_schema` in the task JSON so the wrapper asks Claude for machine-parseable output.
 
+For `worker` tasks, the wrapper prepares parent directories for files listed in `write_scope` before Claude starts. Use `prepare_dirs` only for extra directories that are not implied by `write_scope`.
+
 ## Run Artifacts
 
 Each run creates its own directory under the task `cwd`:
@@ -84,6 +86,8 @@ Each run creates its own directory under the task `cwd`:
 - `.claude-subagents/runs/<run-id>/summary.json`
 
 Use `ops.jsonl` for day-to-day collaboration. Use `raw.stream.jsonl` only when Codex needs the full Claude event stream.
+
+The wrapper also records `prepared_dirs` and `permission_denial` events in `ops.jsonl`, and captures `StructuredOutput` payloads directly into `summary.json.structured_result`.
 
 For the exact task schema and example payloads, read `references/task-contract.md`.
 

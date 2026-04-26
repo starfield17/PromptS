@@ -18,6 +18,8 @@ from uuid import uuid4
 READ_ONLY_DEFAULT_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]
 WORKER_DEFAULT_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"]
 WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
+STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
+PERMISSION_DENIAL_RE = re.compile(r"Permission to use ([A-Za-z0-9_-]+) has been denied")
 
 
 def die(message: str, exit_code: int = 1) -> None:
@@ -85,6 +87,26 @@ def tool_base_name(tool_spec: str) -> str:
     return match.group(1) if match else tool_spec.strip()
 
 
+def is_path_within(root: Path, candidate: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_task_path(cwd_path: Path, raw_path: str, field_name: str) -> Path:
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = cwd_path / candidate
+    resolved = candidate.resolve()
+    if not is_path_within(cwd_path, resolved):
+        die(
+            f"Field '{field_name}' must stay within cwd {cwd_path}: {raw_path}"
+        )
+    return resolved
+
+
 def normalize_task(raw_task: Any) -> dict[str, Any]:
     if not isinstance(raw_task, dict):
         die("Task JSON must be an object.")
@@ -112,6 +134,7 @@ def normalize_task(raw_task: Any) -> dict[str, Any]:
     constraints = normalize_string_list(task.get("constraints"), "constraints")
     deliverables = normalize_string_list(task.get("deliverables"), "deliverables")
     write_scope = normalize_string_list(task.get("write_scope"), "write_scope")
+    prepare_dirs = normalize_string_list(task.get("prepare_dirs"), "prepare_dirs")
     context = normalize_context(task.get("context"))
     output_schema = task.get("output_schema")
 
@@ -128,12 +151,18 @@ def normalize_task(raw_task: Any) -> dict[str, Any]:
             )
         if write_scope:
             die("Reader tasks must not declare 'write_scope'.")
+        if prepare_dirs:
+            die("Reader tasks must not declare 'prepare_dirs'.")
 
     if role == "worker":
         if not write_scope:
             die("Worker tasks must declare a non-empty 'write_scope'.")
         if not allowed_tools:
             allowed_tools = WORKER_DEFAULT_TOOLS.copy()
+        for path_value in write_scope:
+            resolve_task_path(cwd_path, path_value, "write_scope")
+        for path_value in prepare_dirs:
+            resolve_task_path(cwd_path, path_value, "prepare_dirs")
 
     if output_schema is not None and not isinstance(output_schema, dict):
         die("Field 'output_schema' must be a JSON object when provided.")
@@ -148,6 +177,7 @@ def normalize_task(raw_task: Any) -> dict[str, Any]:
         "deliverables": deliverables,
         "allowed_tools": allowed_tools,
         "write_scope": write_scope,
+        "prepare_dirs": prepare_dirs,
         "output_schema": output_schema,
     }
     return normalized
@@ -195,8 +225,11 @@ def build_system_prompt(task: dict[str, Any]) -> str:
             [
                 "This task may modify files only when necessary.",
                 f"Only touch files inside this write scope: {scope}",
+                "Required directories are prepared before the task starts.",
                 "Make the smallest change that satisfies the goal.",
                 "Do not touch unrelated files or perform drive-by cleanup.",
+                "Prefer Write and Edit over Bash when creating or updating files.",
+                "If a tool is denied, treat that as a blocker and report it instead of retrying blindly.",
                 "If the scope is insufficient, stop and say so instead of expanding it yourself.",
                 "If you changed files, end with a short changed-files summary.",
             ]
@@ -227,6 +260,10 @@ def build_user_prompt(task: dict[str, Any]) -> str:
 
     if task["role"] == "worker":
         sections.extend(["", render_prompt_section("Write scope", task["write_scope"])])
+        if task["prepare_dirs"]:
+            sections.extend(
+                ["", render_prompt_section("Prepared directories", task["prepare_dirs"])]
+            )
 
     if task["output_schema"] is not None:
         sections.extend(
@@ -324,6 +361,180 @@ def parse_text_blocks_from_message(message: dict[str, Any]) -> list[str]:
     return result
 
 
+def summarize_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return repr(value)
+
+
+def build_permission_denial(
+    message: str,
+    tool_use_id: str | None = None,
+    tool_name: str | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(message, str) or "has been denied" not in message:
+        return None
+    match = PERMISSION_DENIAL_RE.search(message)
+    normalized_tool = tool_name or (match.group(1) if match else None)
+    return {
+        "tool": normalized_tool,
+        "tool_use_id": tool_use_id,
+        "message": message,
+    }
+
+
+def append_permission_denial(
+    summary: dict[str, Any],
+    ops_path: Path,
+    quiet: bool,
+    denial: dict[str, Any] | None,
+) -> None:
+    if denial is None:
+        return
+    dedupe_key = (
+        denial.get("tool"),
+        denial.get("tool_use_id"),
+        denial.get("message"),
+    )
+    for existing in summary["permission_denials"]:
+        existing_key = (
+            existing.get("tool"),
+            existing.get("tool_use_id"),
+            existing.get("message"),
+        )
+        if existing_key == dedupe_key:
+            return
+    summary["permission_denials"].append(denial)
+    emit_op(
+        ops_path,
+        {
+            "type": "permission_denial",
+            "tool": denial.get("tool"),
+            "tool_use_id": denial.get("tool_use_id"),
+            "message": truncate_text(denial.get("message", "")),
+        },
+        quiet,
+    )
+
+
+def normalize_tool_result_event(event: dict[str, Any]) -> dict[str, Any]:
+    tool_result = event.get("tool_use_result", {})
+    content = event.get("message", {}).get("content", [])
+    tool_use_id = None
+    content_item: dict[str, Any] = {}
+    if content and isinstance(content, list) and isinstance(content[0], dict):
+        content_item = content[0]
+        tool_use_id = content_item.get("tool_use_id")
+
+    extra_preview = ""
+    if isinstance(tool_result, dict):
+        is_error = tool_result.get("is_error", content_item.get("is_error", False))
+        stdout = tool_result.get("stdout", "")
+        stderr = tool_result.get("stderr", "")
+        stdout = stdout if isinstance(stdout, str) else ""
+        stderr = stderr if isinstance(stderr, str) else ""
+        content_text = content_item.get("content")
+        if not stdout and not stderr and isinstance(content_text, str) and content_text.strip():
+            if is_error:
+                stderr = content_text
+            else:
+                stdout = content_text
+        if not stdout and not stderr and tool_result:
+            extra_preview = summarize_value(tool_result)
+    else:
+        is_error = content_item.get("is_error", False)
+        rendered = summarize_value(tool_result)
+        stdout = "" if is_error else rendered
+        stderr = rendered if is_error else ""
+
+    preview_source = stdout or stderr or extra_preview
+    denial = build_permission_denial(
+        stderr or stdout or extra_preview,
+        tool_use_id=tool_use_id,
+    )
+    return {
+        "tool_use_id": tool_use_id,
+        "is_error": is_error,
+        "stdout": stdout,
+        "stderr": stderr,
+        "preview": preview_source,
+        "permission_denial": denial,
+    }
+
+
+def normalize_permission_denials(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = [value]
+    normalized: list[dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            message = item.get("message") or item.get("error") or summarize_value(item)
+            denial = build_permission_denial(
+                message,
+                tool_use_id=item.get("tool_use_id"),
+                tool_name=item.get("tool"),
+            )
+            normalized.append(denial or {"message": message})
+        else:
+            message = summarize_value(item)
+            normalized.append(build_permission_denial(message) or {"message": message})
+    return normalized
+
+
+def compute_prepared_dirs(task: dict[str, Any]) -> list[Path]:
+    if task["role"] != "worker":
+        return []
+
+    cwd_path = Path(task["cwd"]).resolve()
+    prepared: list[Path] = []
+    seen: set[Path] = set()
+
+    for raw_scope in task["write_scope"]:
+        parent_dir = resolve_task_path(cwd_path, raw_scope, "write_scope").parent
+        if parent_dir != cwd_path and parent_dir not in seen:
+            seen.add(parent_dir)
+            prepared.append(parent_dir)
+
+    for raw_dir in task["prepare_dirs"]:
+        resolved_dir = resolve_task_path(cwd_path, raw_dir, "prepare_dirs")
+        if resolved_dir != cwd_path and resolved_dir not in seen:
+            seen.add(resolved_dir)
+            prepared.append(resolved_dir)
+
+    return prepared
+
+
+def prepare_worker_dirs(task: dict[str, Any], ops_path: Path, quiet: bool) -> None:
+    if task["role"] != "worker":
+        return
+
+    created: list[str] = []
+    already_present: list[str] = []
+    for dir_path in compute_prepared_dirs(task):
+        if dir_path.exists():
+            already_present.append(str(dir_path))
+            continue
+        dir_path.mkdir(parents=True, exist_ok=True)
+        created.append(str(dir_path))
+
+    emit_op(
+        ops_path,
+        {
+            "type": "prepared_dirs",
+            "created": created,
+            "already_present": already_present,
+        },
+        quiet,
+    )
+
+
 def handle_stream_event(
     event: dict[str, Any],
     summary: dict[str, Any],
@@ -378,6 +589,17 @@ def handle_stream_event(
                 },
                 quiet,
             )
+            if tool_call.get("name") == STRUCTURED_OUTPUT_TOOL:
+                summary["structured_result"] = tool_call.get("input")
+                emit_op(
+                    ops_path,
+                    {
+                        "type": "structured_result",
+                        "tool_use_id": tool_call.get("id"),
+                        "preview": truncate_text(summarize_value(tool_call.get("input"))),
+                    },
+                    quiet,
+                )
         for text in parse_text_blocks_from_message(message):
             dedupe_key = (message.get("id"), text)
             if dedupe_key in seen_text_keys:
@@ -395,23 +617,24 @@ def handle_stream_event(
         return
 
     if event_type == "user" and "tool_use_result" in event:
-        tool_result = event.get("tool_use_result", {})
-        content = event.get("message", {}).get("content", [])
-        tool_use_id = None
-        if content and isinstance(content, list) and isinstance(content[0], dict):
-            tool_use_id = content[0].get("tool_use_id")
-        preview_source = tool_result.get("stdout") or tool_result.get("stderr") or ""
+        normalized = normalize_tool_result_event(event)
         emit_op(
             ops_path,
             {
                 "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "is_error": tool_result.get("is_error", False),
-                "stdout": truncate_text(tool_result.get("stdout", "")),
-                "stderr": truncate_text(tool_result.get("stderr", "")),
-                "preview": truncate_text(preview_source),
+                "tool_use_id": normalized["tool_use_id"],
+                "is_error": normalized["is_error"],
+                "stdout": truncate_text(normalized["stdout"]),
+                "stderr": truncate_text(normalized["stderr"]),
+                "preview": truncate_text(normalized["preview"]),
             },
             quiet,
+        )
+        append_permission_denial(
+            summary=summary,
+            ops_path=ops_path,
+            quiet=quiet,
+            denial=normalized["permission_denial"],
         )
         return
 
@@ -423,7 +646,8 @@ def handle_stream_event(
         summary["api_error_status"] = event.get("api_error_status")
         summary["terminal_reason"] = event.get("terminal_reason")
         summary["num_turns"] = event.get("num_turns")
-        summary["permission_denials"] = event.get("permission_denials", [])
+        for denial in normalize_permission_denials(event.get("permission_denials", [])):
+            append_permission_denial(summary, ops_path, quiet, denial)
         emit_op(
             ops_path,
             {
@@ -480,6 +704,7 @@ def run_command(args: argparse.Namespace) -> int:
         },
         args.quiet,
     )
+    prepare_worker_dirs(task, ops_path, args.quiet)
 
     command = [
         "claude",
@@ -533,14 +758,25 @@ def run_command(args: argparse.Namespace) -> int:
                         args.quiet,
                     )
                     continue
-                handle_stream_event(
-                    event=event,
-                    summary=summary,
-                    ops_path=ops_path,
-                    quiet=args.quiet,
-                    seen_tool_use_keys=seen_tool_use_keys,
-                    seen_text_keys=seen_text_keys,
-                )
+                try:
+                    handle_stream_event(
+                        event=event,
+                        summary=summary,
+                        ops_path=ops_path,
+                        quiet=args.quiet,
+                        seen_tool_use_keys=seen_tool_use_keys,
+                        seen_text_keys=seen_text_keys,
+                    )
+                except Exception as exc:
+                    emit_op(
+                        ops_path,
+                        {
+                            "type": "event_error",
+                            "event_type": event.get("type"),
+                            "error": truncate_text(str(exc)),
+                        },
+                        args.quiet,
+                    )
         finally:
             stderr_output = process.stderr.read() if process.stderr is not None else ""
             stderr_path.write_text(stderr_output, encoding="utf-8")
@@ -556,11 +792,14 @@ def run_command(args: argparse.Namespace) -> int:
         if stderr_output:
             summary["result"] = truncate_text(stderr_output)
 
-    if task["output_schema"] is not None and isinstance(summary.get("result"), str):
-        try:
-            summary["structured_result"] = json.loads(summary["result"])
-        except json.JSONDecodeError as exc:
-            summary["result_parse_error"] = str(exc)
+    if task["output_schema"] is not None and summary.get("structured_result") is None:
+        if isinstance(summary.get("result"), str):
+            try:
+                summary["structured_result"] = json.loads(summary["result"])
+            except json.JSONDecodeError as exc:
+                summary["result_parse_error"] = str(exc)
+        elif summary.get("result") is not None:
+            summary["structured_result"] = summary["result"]
 
     if return_code and not stderr_output and summary["result"] is None:
         summary["result"] = f"claude exited with code {return_code}"
