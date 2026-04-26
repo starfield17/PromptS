@@ -1,147 +1,90 @@
 ---
-name: claude-code-subagents
-description: use this skill when codex needs to delegate coding, analysis, review, debugging, refactoring, test generation, repository exploration, or documentation tasks to one or more claude code subprocess agents. this skill provides a lightweight protocol for running observable claude code subagents in isolated workspaces, collecting auditable artifacts, and letting codex coordinate follow-up work while retaining final authority.
+name: claude-subagents
+description: Use this skill when Codex should delegate one or more bounded tasks to the local Claude Code CLI as observable subagents, especially for parallel reader tasks, isolated worker tasks, second-opinion analysis, or collaborations where Codex must inspect Claude's concrete tool behavior and outputs.
 ---
 
-# Claude Code Subagents
+# Claude Subagents
 
-Use this skill to run Claude Code as one or more observable subagents under Codex supervision.
+## Overview
 
-The primary agent remains responsible for planning, validation, final decisions, and user-facing answers. Claude Code subagents are disposable workers that inspect code, propose changes, run commands if allowed, and return structured artifacts for review.
+This skill lets Codex use the local `claude` CLI as an external subagent runner.
 
-## Use this skill when
+Keep the split of responsibilities simple:
 
-- the work can be split into narrow tasks
-- independent exploration or implementation would benefit from parallelism
-- Codex wants an external reviewer, tester, debugger, or adversarial pass
-- you want logs, diffs, and status files that Codex can inspect after each run
+- Codex decides whether a task is a `reader` or a `worker`
+- Codex prepares a small task contract for each subtask
+- Codex launches one or more Claude runs in parallel
+- Codex watches `ops.jsonl` for collaboration and `summary.json` for final results
 
-## Do not use this skill when
+The skill does not do task decomposition, scheduling, or result synthesis for Codex. It only provides a stable handoff contract plus observable run artifacts.
 
-- the task is too small to justify process overhead
-- the task requires broad authority across the whole repository
-- Codex is not prepared to inspect artifacts before applying changes
-- the user expects Claude Code to make the final decision without Codex review
+## When To Use
 
-## Core rules
+Use this skill when at least one of these is true:
 
-- Delegate execution, not authority.
-- Prefer small, independent tasks with explicit completion criteria.
-- Treat subagent outputs as evidence, not truth.
-- Preserve artifacts in `.CC_subagent/` so Codex can audit behavior.
-- Inspect `patch.diff`, `result.md`, `status.json`, and `events.jsonl` before accepting a result.
-- If multiple tasks touch the same file, escalate to Codex review instead of auto-merging.
+- You want a second model to inspect code, logs, or docs independently
+- You want multiple bounded subtasks to run in parallel
+- You want Codex to inspect Claude's actual tool calls and outputs
+- You want a separate `worker` to make a narrow edit with an explicit write scope
+- You want a durable artifact trail for later review or retry
 
-## Runtime model
+Do not use this skill when Codex can finish the work directly without meaningful benefit from delegation.
 
-The default runtime root is `.CC_subagent/` under the active repository or working directory. Each task gets:
+## Quick Start
 
-- `runs/<task-id>/` for observable artifacts
-- `workspaces/<task-id>/` for the isolated execution workspace
+1. Create a task JSON using the contract in `references/task-contract.md`
+2. Run `scripts/claude_subagent.py run --task-file /path/to/task.json`
+3. Watch the live JSONL events on stdout or inspect `.claude-subagents/runs/.../ops.jsonl`
+4. Read `.claude-subagents/runs/.../summary.json` when the run finishes
 
-Execution mode is chosen by the wrapper:
+Useful follow-up commands:
 
-- `git-worktree`: used for clean Git repositories, so `patch.diff` maps cleanly to subagent changes
-- `copy`: used for non-Git directories and dirty Git repositories, so the workspace preserves the current local state without mixing in pre-existing edits
+- `scripts/claude_subagent.py tail /path/to/run-dir --follow`
+- `scripts/claude_subagent.py summary /path/to/run-dir`
 
-The wrapper always writes stable artifacts, even when Claude does not:
+## Roles
 
-```text
-.CC_subagent/
-  index.json
-  summary.md
-  summary.json
-  runs/
-    <task-id>/
-      task.md
-      prompt.md
-      events.jsonl
-      stderr.log
-      result.md
-      status.json
-      changed-files.txt
-      patch.diff
-      session.json
-      exit_code.txt
-  workspaces/
-    <task-id>/
-```
+### `reader`
 
-## Minimal workflow
+Use `reader` for bounded analysis tasks.
 
-1. Decide whether the task should be delegated.
-2. Split the work into one or more bounded task files.
-3. Author each task in Markdown, preferably from `references/task-template.md`.
-4. Launch one task with `scripts/run_subagent.sh` or many with `scripts/run_parallel_subagents.py`.
-5. Monitor `status.json` and `events.jsonl` while tasks run.
-6. Aggregate results with `scripts/collect_results.py`.
-7. Inspect diffs, logs, and claims before applying anything.
-8. Launch follow-up reviewer or adversary tasks when evidence conflicts.
+- Default tool policy is read-only
+- No file edits are allowed
+- Good for code reading, grep-based investigation, log inspection, and independent review
 
-## Task authoring
+### `worker`
 
-Every task should state:
+Use `worker` only when the task needs file changes.
 
-- task id
-- role
-- objective
-- scope
-- out-of-scope areas
-- permissions
-- completion criteria
-- expected outputs
+- `write_scope` is required
+- The wrapper injects an explicit scope rule into Claude's instructions
+- Parallel `worker` runs are safe only when their write scopes do not overlap or their working directories are isolated
 
-Keep the task format flexible. The wrapper understands only Markdown tasks and artifact paths. Role semantics remain a prompt-layer convention, not a runtime-enforced contract.
+## How Codex Should Delegate
 
-See `references/protocol.md` for the full protocol and `references/task-template.md` for the recommended template.
+Keep each task contract small and decision-complete.
 
-## Observation model
+- One task should have one clear goal
+- Include only the minimum context Claude needs
+- State constraints explicitly instead of assuming them
+- Ask for concrete deliverables Codex can consume directly
+- Prefer several narrow `reader` tasks over one broad exploratory task
 
-Codex should inspect:
+If a task needs structured output, set `output_schema` in the task JSON so the wrapper asks Claude for machine-parseable output.
 
-- `status.json` for stable machine-readable status
-- `events.jsonl` for raw Claude output events
-- `stderr.log` for launcher or CLI failures
-- `result.md` for human-readable findings
-- `patch.diff` for proposed file changes
-- `changed-files.txt` for quick surface-area checks
-- `session.json` for runtime metadata and workspace mode
+## Run Artifacts
 
-If a claim matters, verify it independently. Do not accept a subagent result purely because it reports `success`.
+Each run creates its own directory under the task `cwd`:
 
-## Suggested roles
+- `.claude-subagents/runs/<run-id>/task.json`
+- `.claude-subagents/runs/<run-id>/system_prompt.txt`
+- `.claude-subagents/runs/<run-id>/user_prompt.txt`
+- `.claude-subagents/runs/<run-id>/raw.stream.jsonl`
+- `.claude-subagents/runs/<run-id>/ops.jsonl`
+- `.claude-subagents/runs/<run-id>/summary.json`
 
-Codex may define any role, but these common ones work well:
+Use `ops.jsonl` for day-to-day collaboration. Use `raw.stream.jsonl` only when Codex needs the full Claude event stream.
 
-- `explorer`
-- `implementer`
-- `reviewer`
-- `tester`
-- `debugger`
-- `documenter`
-- `adversary`
+For the exact task schema and example payloads, read `references/task-contract.md`.
 
-See `references/delegation-patterns.md` for example coordination patterns.
-
-## Safety and containment
-
-Prefer narrow scope and explicit permissions. Avoid broad authority to:
-
-- rewrite unrelated files
-- delete files
-- touch credentials or secrets
-- install global dependencies
-- modify lockfiles unless the task requires it
-- run destructive commands outside the isolated workspace
-
-If broad permissions are necessary, say why in the task file.
-
-## Coordination reminders
-
-- Prefer one task per concern.
-- Prefer reviewer subagents for large or risky patches.
-- Preserve failing or partial runs; they are useful evidence.
-- If two subagents disagree, inspect artifacts and launch a focused follow-up task instead of averaging answers.
-- After accepting changes, run validation from Codex when the repository supports it.
-
-This skill is successful when Codex gains an observable, parallel, auditable Claude Code worker pool without giving up final control.
+For the observability contract and file meanings, read `references/observability.md`.
