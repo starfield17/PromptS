@@ -1,0 +1,7 @@
+interface:
+  display_name: "Claude Code Subagents"
+  short_description: "Run observable Claude Code subagents."
+  default_prompt: "Use $claude-code-subagents to delegate one or more narrow tasks to Claude Code, collect artifacts under .CC_subagent, and summarize the results before applying anything."
+
+policy:
+  allow_implicit_invocation: false
