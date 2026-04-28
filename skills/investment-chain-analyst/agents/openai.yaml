@@ -1,0 +1,4 @@
+interface:
+  display_name: "Investment Chain Analyst"
+  short_description: "Map sector chains, signals, variables, and buy-side research theses."
+  icon: "📈"
