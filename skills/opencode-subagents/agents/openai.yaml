@@ -1,0 +1,7 @@
+interface:
+  display_name: "OpenCode Subagents"
+  short_description: "Run observable OpenCode subagents in parallel"
+  default_prompt: "Use $opencode-subagents to delegate bounded subtasks to local OpenCode subagents and summarize their observed results."
+
+policy:
+  allow_implicit_invocation: true
