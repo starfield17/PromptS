@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NewsPack",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "query", "items"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "query": {"type": "string"},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "trigger_type", "confidence"],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "url": {"type": ["string", "null"]},
+          "publisher": {"type": ["string", "null"]},
+          "date": {"type": ["string", "null"]},
+          "summary": {"type": ["string", "null"]},
+          "text": {"type": ["string", "null"]},
+          "entities": {"type": "array", "items": {"type": "string"}},
+          "trigger_type": {"type": "string"},
+          "confidence": {"enum": ["high", "medium", "low", "unknown"]},
+          "source_id": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "sources": {"type": "array", "items": {"$ref": "source.schema.json"}},
+    "errors": {"type": "array", "items": {"$ref": "error.schema.json"}}
+  }
+}

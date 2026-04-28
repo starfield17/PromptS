@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PriceSeriesRow",
+  "type": "object",
+  "required": ["ticker", "date"],
+  "properties": {
+    "ticker": {"type": "string"},
+    "date": {"type": "string"},
+    "close": {"type": ["number", "null"]},
+    "volume": {"type": ["number", "integer", "null"]}
+  }
+}

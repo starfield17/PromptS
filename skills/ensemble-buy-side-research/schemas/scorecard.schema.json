@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScoreCard",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "layer_scores", "initial_judgment"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "direction": {"type": ["string", "null"]},
+    "layer_scores": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["layer", "profit_pool_score", "commoditization_risk_score", "investability_score"],
+        "properties": {
+          "layer": {"type": "string"},
+          "problem_quality_score": {"type": "integer"},
+          "profit_pool_score": {"type": "integer"},
+          "commoditization_risk_score": {"type": "integer"},
+          "consensus_gap_score": {"type": "integer"},
+          "investability_score": {"type": "number"},
+          "evidence": {"type": "array", "items": {"type": "string"}},
+          "notes": {"type": "string"}
+        }
+      }
+    },
+    "initial_judgment": {"enum": ["A. Discard", "B. Watch", "C. Deep Dive", "D. Potential Investment Thesis"]},
+    "rationale": {"type": "string"}
+  }
+}

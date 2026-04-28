@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Thesis",
+  "type": "object",
+  "required": [
+    "statement",
+    "consensus",
+    "variant_view",
+    "layer",
+    "variables",
+    "falsification",
+    "judgment"
+  ],
+  "properties": {
+    "statement": {
+      "type": "string"
+    },
+    "consensus": {
+      "type": "string"
+    },
+    "variant_view": {
+      "type": "string"
+    },
+    "layer": {
+      "type": "string"
+    },
+    "time_horizon": {
+      "type": "string"
+    },
+    "variables": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "falsification": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "judgment": {
+      "type": "string",
+      "enum": [
+        "A. Discard",
+        "B. Watch",
+        "C. Deep Dive",
+        "D. Potential Investment Thesis"
+      ]
+    },
+    "next_action": {
+      "type": "string"
+    }
+  }
+}

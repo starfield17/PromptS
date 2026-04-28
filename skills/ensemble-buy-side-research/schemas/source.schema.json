@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Source",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "type",
+    "reliability"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "url": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "filing",
+        "transcript",
+        "news",
+        "policy",
+        "database",
+        "presentation",
+        "social",
+        "other"
+      ]
+    },
+    "publisher": {
+      "type": "string"
+    },
+    "date": {
+      "type": "string"
+    },
+    "reliability": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "relevant_claims": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "linked_variables": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}
