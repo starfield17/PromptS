@@ -47,6 +47,20 @@ MEMO_TEMPLATE = Template(
 
 {{ memo.profit_pool.get("summary", "Source needed") }}
 
+## Buffett Quality Lens
+
+| Field | Assessment |
+|---|---|
+| Circle of Competence | {{ memo.buffett_quality_lens.get("circle_of_competence", "Unknown") }} |
+| Business Quality | {{ memo.buffett_quality_lens.get("business_quality", "Source needed") }} |
+| Moat Source | {{ memo.buffett_quality_lens.get("moat_source", "Source needed") }} |
+| Moat Trend | {{ memo.buffett_quality_lens.get("moat_trend", "Unknown") }} |
+| Pricing Power | {{ memo.buffett_quality_lens.get("pricing_power", "Source needed") }} |
+| Capital Intensity | {{ memo.buffett_quality_lens.get("capital_intensity", "Source needed") }} |
+| Five-Year Market Closure Test | {{ memo.buffett_quality_lens.get("five_year_market_closure_test", "Unknown") }} |
+| Downside / Ruin Risk | {{ memo.buffett_quality_lens.get("downside_or_ruin_risk", "Source needed") }} |
+| Implication | {{ memo.buffett_quality_lens.get("implication", "Neutral pending evidence") }} |
+
 ## Commoditization Risk
 
 {% for item in memo.commoditization_risk -%}
@@ -128,6 +142,17 @@ def build_memo(
         facts=facts,
         value_chain=value_chain,
         profit_pool={"summary": f"Preliminary highest-quality profit-pool candidate: {highest}. Validate with gross margin, pricing power, switching costs, and capex burden."},
+        buffett_quality_lens={
+            "circle_of_competence": "Unknown - validate whether the decisive variables are understandable.",
+            "business_quality": f"Preliminary candidate layer: {highest}; validate return on incremental capital and cash conversion.",
+            "moat_source": "Source needed - test for brand/share-of-mind, low cost, switching cost, scale, IP, license, or process know-how.",
+            "moat_trend": "Unknown",
+            "pricing_power": "Source needed - compare price, gross margin, discounting, and customer behavior.",
+            "capital_intensity": "Source needed - compare growth capex with incremental returns.",
+            "five_year_market_closure_test": "Unknown - do not pass until business quality, balance sheet, and valuation are underwritten.",
+            "downside_or_ruin_risk": "Source needed - check leverage, liquidity, concentration, governance, and tail risks.",
+            "implication": "Neutral pending evidence; downgrade if outside competence, no durable moat, or ruin risk appears.",
+        },
         commoditization_risk=[
             {"layer": layer.name, "reason": f"Commoditization risk is currently marked {layer.commoditization_risk}; validate with supplier count, ASP pressure, and switching cost."}
             for layer in layers

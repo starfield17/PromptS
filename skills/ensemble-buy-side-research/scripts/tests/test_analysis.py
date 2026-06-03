@@ -50,4 +50,5 @@ def test_value_chain_scoring_watchlist_and_memo() -> None:
     memo = build_memo("AI inference chips", chain, consensus, watchlist, scorecard)
     rendered = render_memo(memo)
     assert "## Value Chain Map" in rendered
+    assert "## Buffett Quality Lens" in rendered
     assert "## Falsification Conditions" in rendered

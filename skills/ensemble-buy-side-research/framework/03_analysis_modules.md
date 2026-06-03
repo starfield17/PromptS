@@ -140,7 +140,51 @@ Low-quality pass-through layer
 
 ---
 
-## Module 5: Commoditization Risk
+## Module 5: Buffett Quality Lens
+
+### Purpose
+
+Add an owner-oriented quality and risk gate before treating a profit pool as investable.
+
+### Inputs
+
+```text
+best profit-pool candidate
+representative companies
+financial metrics
+competitive evidence
+source pack
+analyst uncertainty
+```
+
+### Output
+
+```text
+Circle of competence: inside / edge / outside / unknown
+Business quality: weak / mixed / strong / exceptional
+Moat source
+Moat trend: widening / stable / narrowing / unknown
+Pricing power
+Capital intensity
+Management / capital allocation
+Five-year market closure test
+Downside / ruin risk
+Buffett-lens implication: upgrade / neutral / downgrade / pass
+Evidence needed
+```
+
+### Override Rules
+
+```text
+Outside circle of competence -> cannot be Potential Investment Thesis.
+No durable moat + high commoditization risk -> normally Watch or Discard.
+High leverage or ruin risk -> downgrade regardless of upside narrative.
+Wonderful business but no valuation sanity -> Watch until price/risk-reward is clear.
+```
+
+---
+
+## Module 6: Commoditization Risk
 
 ### Purpose
 
@@ -171,7 +215,7 @@ Investment implication
 
 ---
 
-## Module 6: Consensus Extraction
+## Module 7: Consensus Extraction
 
 ### Purpose
 
@@ -201,7 +245,7 @@ Possible blind spot:
 
 ---
 
-## Module 7: Variant Perception
+## Module 8: Variant Perception
 
 ### Purpose
 
@@ -231,7 +275,7 @@ Falsification
 
 ---
 
-## Module 8: Key Variable Mapping
+## Module 9: Key Variable Mapping
 
 ### Purpose
 
@@ -250,7 +294,7 @@ Bearish signal
 
 ---
 
-## Module 9: Thesis Card
+## Module 10: Thesis Card
 
 ### Purpose
 
@@ -272,7 +316,7 @@ Next Step
 
 ---
 
-## Module 10: Memo Composer
+## Module 11: Memo Composer
 
 ### Purpose
 

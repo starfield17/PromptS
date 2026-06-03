@@ -110,6 +110,8 @@ class LayerScore(BaseModel):
     profit_pool_score: int = Field(default=0, ge=0, le=50)
     commoditization_risk_score: int = Field(default=0, ge=0, le=40)
     consensus_gap_score: int = Field(default=0, ge=0, le=25)
+    buffett_quality_score: int = Field(default=0, ge=0, le=35)
+    downside_risk_penalty: int = Field(default=0, ge=0, le=20)
     investability_score: float = Field(default=0, ge=0, le=100)
     evidence: list[str] = Field(default_factory=list)
     notes: str = ""
@@ -159,6 +161,7 @@ class Thesis(BaseModel):
     time_horizon: str = "6-24 months"
     variables: list[str] = Field(default_factory=list)
     falsification: list[str] = Field(default_factory=list)
+    buffett_quality_lens: dict[str, Any] = Field(default_factory=dict)
     judgment: Judgment = "B. Watch"
     next_action: str = ""
 
@@ -170,6 +173,7 @@ class ResearchMemo(Artifact):
     facts: list[dict[str, Any]] = Field(default_factory=list)
     value_chain: ValueChain | None = None
     profit_pool: dict[str, Any] = Field(default_factory=dict)
+    buffett_quality_lens: dict[str, Any] = Field(default_factory=dict)
     commoditization_risk: list[dict[str, Any]] = Field(default_factory=list)
     market_consensus: str = "Assumed consensus, pending source validation"
     variant_view: str = "Source needed"

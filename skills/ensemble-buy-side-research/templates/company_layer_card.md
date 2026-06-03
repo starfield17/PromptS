@@ -28,6 +28,12 @@ Role:
 | Switching cost |  |
 | Competition |  |
 | Key risk |  |
+| Circle of competence | Inside / Edge / Outside / Unknown |
+| Moat source |  |
+| Moat trend | Widening / Stable / Narrowing / Unknown |
+| Return on incremental capital |  |
+| Five-year market closure test | Pass / Fail / Unknown |
+| Downside / ruin risk |  |
 
 ## Thesis Relevance
 

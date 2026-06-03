@@ -8,6 +8,7 @@
     "problem_solved",
     "value_chain",
     "profit_pool",
+    "buffett_quality_lens",
     "market_consensus",
     "variant_view",
     "key_variables",
@@ -114,6 +115,47 @@
       "type": "array",
       "items": {
         "type": "string"
+      }
+    },
+    "buffett_quality_lens": {
+      "type": "object",
+      "properties": {
+        "circle_of_competence": {
+          "type": "string"
+        },
+        "business_quality": {
+          "type": "string"
+        },
+        "moat_source": {
+          "type": "string"
+        },
+        "moat_trend": {
+          "type": "string"
+        },
+        "pricing_power": {
+          "type": "string"
+        },
+        "capital_intensity": {
+          "type": "string"
+        },
+        "management_capital_allocation": {
+          "type": "string"
+        },
+        "five_year_market_closure_test": {
+          "type": "string"
+        },
+        "downside_or_ruin_risk": {
+          "type": "string"
+        },
+        "implication": {
+          "type": "string"
+        },
+        "evidence_needed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     }
   }

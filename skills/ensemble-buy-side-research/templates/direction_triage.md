@@ -22,6 +22,10 @@ Time horizon:
 | Who benefits second? |  |
 | Who may lose? |  |
 | What value-chain layer is most important? |  |
+| Is the idea inside the circle of competence? | Inside / Edge / Outside / Unknown |
+| What moat could protect the profit pool? |  |
+| Would this survive a five-year market closure test? | Pass / Fail / Unknown |
+| Is there any leverage, liquidity, or ruin risk? |  |
 | What data would validate the idea? |  |
 | What data would kill the idea? |  |
 

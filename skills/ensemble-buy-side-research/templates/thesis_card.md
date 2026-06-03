@@ -33,6 +33,18 @@ Commoditization risk:
 |---|---|---|---|
 |  |  |  |  |
 
+## Buffett Quality Lens
+
+| Question | Answer |
+|---|---|
+| Circle of competence | Inside / Edge / Outside / Unknown |
+| Moat source and trend |  |
+| Pricing power |  |
+| Incremental capital required |  |
+| Five-year market closure test | Pass / Fail / Unknown |
+| Downside / ruin risk |  |
+| Implication | Upgrade / Neutral / Downgrade / Pass |
+
 ## Time Horizon
 
 ```text

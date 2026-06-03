@@ -77,6 +77,29 @@ Interpretation:
 28–40: high, avoid unless timing or valuation is exceptional
 ```
 
+## Buffett Quality Score
+
+Use this as an owner-oriented quality gate. Score 1-5 unless specified.
+
+| Factor | 1 | 3 | 5 |
+|---|---:|---:|---:|
+| Circle of Competence | outside | edge / partially understood | clearly inside |
+| Moat Durability | none / shrinking | plausible but mixed | durable and likely widening |
+| Pricing Power | price taker | mixed | price setter / premium sustained |
+| Return on Incremental Capital | poor / capex-heavy | acceptable | high-return reinvestment |
+| Business Simplicity | hard to underwrite | partially clear | simple enough for 5-year ownership |
+| Management / Capital Allocation | poor incentives | adequate | owner-oriented / disciplined |
+| Downside / Ruin Risk | existential | manageable | limited and visible |
+
+Interpretation:
+
+```text
+7-16: weak Buffett quality; do not force a thesis.
+17-25: mixed; Watch or Deep Dive only with explicit unknowns.
+26-32: strong; quality supports deeper work.
+33-35: exceptional; verify valuation and consensus crowding.
+```
+
 ## Investability Score
 
 Use this as a final check, not a mechanical decision.
@@ -89,6 +112,7 @@ Use this as a final check, not a mechanical decision.
 | Data Availability | 15% |
 | Timing / Catalyst | 10% |
 | Valuation Sanity | 10% |
+| Buffett Quality / Moat Durability | override / tie-breaker |
 
 Decision guide:
 
@@ -144,4 +168,5 @@ Do not label as `Potential Investment Thesis` unless all are true:
 [ ] Key variables are observable.
 [ ] Falsification conditions are explicit.
 [ ] Next research action is concrete.
+[ ] Buffett lens does not force a downgrade: inside or edge of competence, durable moat evidence, no ruin risk, and valuation sanity checked.
 ```

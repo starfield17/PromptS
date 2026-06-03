@@ -19,5 +19,8 @@ Best profit pool:
 Most crowded layer:
 Most fragile layer:
 Hidden second-order layer:
+Buffett-quality layer:
+Moat source / trend:
+Layer to avoid due to weak economics or ruin risk:
 Potential losers:
 ```

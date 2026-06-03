@@ -167,3 +167,60 @@ Fix:
 ```text
 End with A/B/C/D judgment and next research steps.
 ```
+
+
+## 13. Moat Label Without Evidence
+
+Symptom:
+
+```text
+The memo says a company has a moat but does not show pricing power, switching cost, cost advantage, retention, brand/share-of-mind, or other observable evidence.
+```
+
+Fix:
+
+```text
+Add a Buffett Quality Lens section with moat source, moat trend, and evidence still needed.
+```
+
+## 14. Cheapness Substitutes for Quality
+
+Symptom:
+
+```text
+The thesis depends on a low valuation but the underlying business has weak returns, no reinvestment runway, or deteriorating economics.
+```
+
+Fix:
+
+```text
+Classify it as cigar butt / turnaround / cyclical trade, define catalyst and exit, and do not call it a durable thesis unless quality evidence improves.
+```
+
+## 15. Outside-the-Circle Confidence
+
+Symptom:
+
+```text
+The memo gives a confident conclusion even though the decisive variables are not understandable or source-backed.
+```
+
+Fix:
+
+```text
+Mark circle of competence as Edge or Outside, downgrade judgment, and list the specific unknowns.
+```
+
+## 16. Small Upside, Fatal Downside
+
+Symptom:
+
+```text
+The thesis offers modest upside but contains leverage, liquidity, governance, refinancing, or tail risks that can permanently impair capital.
+```
+
+Fix:
+
+```text
+Apply a ruin-risk override and downgrade regardless of score.
+```

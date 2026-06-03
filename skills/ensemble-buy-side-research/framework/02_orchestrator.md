@@ -23,14 +23,15 @@ user_view: string | null
 4. Build preliminary value-chain map
 5. Identify players by layer
 6. Score profit pools
-7. Score commoditization risk
-8. Extract or infer market consensus
-9. Generate variant-view candidates
-10. Convert thesis into variables
-11. Build watchlist
-12. Define falsification
-13. Assign initial judgment
-14. Generate next research steps
+7. Apply Buffett quality lens
+8. Score commoditization risk
+9. Extract or infer market consensus
+10. Generate variant-view candidates
+11. Convert thesis into variables
+12. Build watchlist
+13. Define falsification
+14. Assign initial judgment
+15. Generate next research steps
 ```
 
 ## Step 1: Normalize Input
@@ -103,11 +104,30 @@ potential losers
 
 Use the scoring rubric in `04_scoring_rubrics.md`.
 
-## Step 7: Commoditization Score
+## Step 7: Buffett Quality Lens
+
+Use `09_buffett_quality_lens.md` to test whether the best-looking layer or company is actually a business worth owning.
+
+Required output:
+
+```text
+Circle of competence
+Moat source and moat trend
+Owner economics
+Pricing power
+Capital intensity
+Five-year market closure test
+Downside / ruin risk
+Implication for judgment
+```
+
+If the idea is outside the circle of competence, has no durable moat, or contains ruin risk, downgrade before continuing.
+
+## Step 8: Commoditization Score
 
 Identify layers likely to face margin erosion.
 
-## Step 8: Consensus
+## Step 9: Consensus
 
 If no fresh market data are available, write:
 
@@ -117,7 +137,7 @@ Assumed consensus, pending source validation:
 
 Do not pretend to know current positioning without evidence.
 
-## Step 9: Variant View
+## Step 10: Variant View
 
 Generate 1–3 variant-view candidates, then select the strongest one.
 
@@ -131,7 +151,7 @@ time horizon
 falsification
 ```
 
-## Step 10: Variables
+## Step 11: Variables
 
 Build a variable map:
 
@@ -139,11 +159,11 @@ Build a variable map:
 Thesis driver → Observable variable → Source → Frequency → Threshold
 ```
 
-## Step 11: Watchlist
+## Step 12: Watchlist
 
 Create a durable table that can be updated later by scripts or manually.
 
-## Step 12: Falsification
+## Step 13: Falsification
 
 List 3–7 conditions.
 
@@ -159,7 +179,7 @@ Weak falsification is vague:
 If the industry does not grow, the thesis is wrong.
 ```
 
-## Step 13: Initial Judgment
+## Step 14: Initial Judgment
 
 Assign one of:
 
@@ -172,7 +192,7 @@ D. Potential Investment Thesis
 
 Include 2–4 sentences explaining why.
 
-## Step 14: Next Steps
+## Step 15: Next Steps
 
 Make the next steps operational.
 

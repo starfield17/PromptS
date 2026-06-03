@@ -63,6 +63,23 @@ Why it may be underappreciated:
 Evidence needed:
 ```
 
+## Buffett Quality Lens
+
+| Question | Answer |
+|---|---|
+| Circle of competence | Inside / Edge / Outside / Unknown |
+| Business quality | Weak / Mixed / Strong / Exceptional |
+| Moat source | Brand / low cost / switching cost / network / distribution / scale / IP / license / location / process know-how / none / unknown |
+| Moat trend | Widening / Stable / Narrowing / Unknown |
+| Owner economics |  |
+| Pricing power |  |
+| Capital intensity |  |
+| Management / capital allocation |  |
+| Five-year market closure test | Pass / Fail / Unknown |
+| Downside / ruin risk |  |
+| Buffett-lens implication | Upgrade / Neutral / Downgrade / Pass |
+| Evidence still needed |  |
+
 ## Commoditization Risk
 
 | Layer | Risk | Reason | Timeline | Possible Survivors | Implication |

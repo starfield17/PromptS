@@ -131,3 +131,65 @@ Watch
 Deep dive
 Build position candidate
 ```
+
+
+## 11. Stay Inside the Circle of Competence
+
+The size of the circle is less important than knowing its boundary. A thesis cannot become `Potential Investment Thesis` if the decisive variables are outside the analyst's understanding.
+
+Use:
+
+```text
+Inside: business model, customers, competitors, economics, and risks are understandable.
+Edge: analyzable, but one or two decisive variables need targeted research.
+Outside: success depends on forecasting variables the analyst cannot reasonably understand.
+```
+
+## 12. Buy Businesses, Not Tickers
+
+A stock is a fractional ownership claim on a business. Do not justify a thesis with chart patterns, headlines, or price targets alone.
+
+Ask:
+
+```text
+Would this still be attractive if I owned the whole business?
+Would I be comfortable if the market closed for five years?
+What cash earnings can the business generate and reinvest?
+```
+
+## 13. Time Helps Wonderful Businesses and Hurts Poor Ones
+
+Long holding periods only help if the business has durable economics. A poor business bought cheaply may offer one free puff, but it should not be treated as a compounder.
+
+Classify opportunities as:
+
+```text
+compounder
+cigar butt
+turnaround
+cyclical trade
+narrative proxy
+```
+
+## 14. Moat Trend Matters More Than Moat Labels
+
+Every moat claim must be tied to evidence and trend.
+
+```text
+Moat source: brand, low cost, switching cost, network, distribution, scale, IP, license, location, process know-how.
+Moat trend: widening, stable, narrowing, unknown.
+```
+
+A moat is widening when the company can improve unit economics, retention, share, or pricing without relying on temporary scarcity or promotion.
+
+## 15. Avoid Risking What Matters for What Does Not
+
+Never accept existential downside for incremental upside. Leverage, liquidity dependence, opaque balance sheets, governance red flags, and tail risk can override an otherwise attractive story.
+
+## 16. Macro Humility
+
+Macro variables may be important but often unknowable. Prefer business-level variables that can be observed: price, volume, margins, backlog, capacity, inventory, churn, retention, cash conversion, and customer behavior.
+
+## 17. Inactivity Is a Valid Outcome
+
+The framework should not force action. `Watch`, `Discard`, and `Source needed` are valid conclusions when the idea lacks durability, evidence, price discipline, or falsifiability.
