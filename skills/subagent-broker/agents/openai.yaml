@@ -1,0 +1,4 @@
+interface:
+  display_name: "Subagent Broker"
+  short_description: "Run isolated parallel coding subagents"
+  default_prompt: "Use $subagent-broker to delegate bounded read-only or patch-only coding tasks."

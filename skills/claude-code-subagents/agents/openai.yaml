@@ -1,4 +1,0 @@
-interface:
-  display_name: "Claude Subagents"
-  short_description: "Run Claude Code as observable subagents"
-  default_prompt: "Use $claude-subagents to delegate bounded reader or worker tasks to local Claude Code runs that Codex can observe."

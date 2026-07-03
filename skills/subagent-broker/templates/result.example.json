@@ -1,0 +1,21 @@
+{
+  "run_id": "auth-review-001",
+  "agent_id": "auth-map",
+  "status": "completed",
+  "mode": "read_only",
+  "harness": "opencode",
+  "model": "deepseek-v4-flash",
+  "summary": "Short human-readable summary.",
+  "files_read": [],
+  "files_changed": [],
+  "patch_path": null,
+  "tests_run": [],
+  "risks": [],
+  "recommendations": [],
+  "policy": null,
+  "error": null,
+  "started_at": "2026-01-01T00:00:00+00:00",
+  "ended_at": "2026-01-01T00:00:00+00:00",
+  "duration_sec": 0.0,
+  "log_path": ".subagents/auth-review-001/auth-map/events.jsonl"
+}

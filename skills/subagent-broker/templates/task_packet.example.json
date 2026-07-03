@@ -1,0 +1,23 @@
+{
+  "run_id": "example-run",
+  "defaults": {
+    "timeout_sec": 600,
+    "mode": "read_only",
+    "harness": "fake",
+    "model": "fake-cheap"
+  },
+  "agents": [
+    {
+      "id": "repo-map",
+      "goal": "Map the repository structure and identify likely test locations.",
+      "allowed_paths": ["**"],
+      "deny_paths": [".env*", ".git/**", "secrets/**"],
+      "return": ["summary", "file_refs", "recommendations"],
+      "fake_response": {
+        "summary": "Fake repo map completed.",
+        "files_read": ["README.md"],
+        "recommendations": ["Run a real harness for actual analysis."]
+      }
+    }
+  ]
+}
