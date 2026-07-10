@@ -27,21 +27,29 @@ Do not use this skill for:
 1. Create a task packet JSON file. Start from `templates/task_packet.example.json` when useful.
 2. Prefer `read_only` mode.
 3. Use `patch_only` mode only when a subagent should propose changes.
-4. Keep `approval_policy` at `default` unless the task requires automatic tool approval. `unattended` is valid in either mode but enables the harness vendor's broad approval flag.
-5. Run:
+4. Give each agent one cohesive deliverable. Split unrelated formats, backends, or applications into separate agents or runs.
+5. For Claude Code, prefer the default `bounded` policy and list each required Bash pattern in `allowed_tools`. Use `unattended` only as an explicit broad-permission escape hatch.
+6. Run:
 
 ```bash
 python .agents/skills/subagent-broker/scripts/subagent_runner.py run tasks.json --wait
 ```
 
-6. Read:
+7. Inspect progress when useful:
+
+```bash
+python .agents/skills/subagent-broker/scripts/subagent_runner.py status .subagents/<run_id>
+python .agents/skills/subagent-broker/scripts/subagent_runner.py cancel .subagents/<run_id>
+```
+
+8. Read:
 
 ```text
 .subagents/<run_id>/summary.md
 ```
 
-7. Review any generated patch manually.
-8. Apply patches only after policy checks pass:
+9. Review any generated patch manually.
+10. Apply patches only after policy checks pass:
 
 ```bash
 python .agents/skills/subagent-broker/scripts/merge_patches.py --check .subagents/<run_id>/<agent_id>/patch.diff
@@ -49,6 +57,8 @@ python .agents/skills/subagent-broker/scripts/merge_patches.py --apply .subagent
 ```
 
 The parent Codex agent is always responsible for final review and merge.
+
+Claude Code headless jobs reject `approval_policy: default` because no interactive approval channel exists. `bounded` uses non-interactive denials, allows read/search tools, adds edit tools in `patch_only`, and requires explicit scoped Bash rules such as `Bash(python -m pytest *)`.
 
 ## Modes
 

@@ -7,6 +7,7 @@
   "model": null,
   "approval_policy": "default",
   "source_repo_root": "/path/to/source/repository",
+  "source_root": "/path/to/source/repository",
   "repo_subdir": ".",
   "baseline_commit": "0123456789abcdef0123456789abcdef01234567",
   "baseline_manifest_path": ".subagents/auth-review-001/auth-map/baseline_manifest.json",
@@ -19,6 +20,12 @@
   "tests_run": [],
   "risks": [],
   "recommendations": [],
+  "harness_metadata": {
+    "stopReason": "EndTurn",
+    "sessionId": "example-session",
+    "requestId": "example-request"
+  },
+  "runtime_path": ".subagents/auth-review-001/auth-map/runtime.json",
   "policy": null,
   "error": null,
   "started_at": "2026-01-01T00:00:00+00:00",

@@ -161,6 +161,11 @@ def check_patch(patch: Path, repo_root: Path, patch_bytes: bytes) -> int:
         return 2
     process = run_git(["apply", "--check", "-"], repo_root, input_bytes=patch_bytes)
     print_process(process)
+    if process.returncode == 0:
+        result = load_result_for_patch(patch) or {}
+        files = result.get("files_changed")
+        count = len(files) if isinstance(files, list) else 0
+        print(f"Patch check passed: {count} files; policy passed; baseline unchanged")
     return process.returncode
 
 
@@ -179,6 +184,11 @@ def apply_patch(patch: Path, repo_root: Path, patch_bytes: bytes) -> int:
     print_process(apply_result)
     if apply_result.returncode != 0:
         print("Patch did not apply cleanly. Regenerate it against the current working tree.", file=sys.stderr)
+    else:
+        result = load_result_for_patch(patch) or {}
+        files = result.get("files_changed")
+        count = len(files) if isinstance(files, list) else 0
+        print(f"Patch applied: {count} files")
     return apply_result.returncode
 
 

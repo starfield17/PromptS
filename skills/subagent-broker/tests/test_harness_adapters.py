@@ -8,7 +8,11 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
-from harness_adapters import build_harness_invocation, decode_harness_output  # noqa: E402
+from harness_adapters import (  # noqa: E402
+    build_harness_invocation,
+    decode_harness_output,
+    normalize_harness_stream_line,
+)
 
 
 def base_agent(harness, mode="read_only", approval_policy="default"):
@@ -18,6 +22,7 @@ def base_agent(harness, mode="read_only", approval_policy="default"):
         "harness": harness,
         "mode": mode,
         "approval_policy": approval_policy,
+        "allowed_tools": [],
         "model": None,
         "agent": None,
         "session_persistence": False,
@@ -77,6 +82,91 @@ class HarnessAdapterTests(unittest.TestCase):
         self.assertIn("--sandbox", codex)
         self.assertIn("workspace-write", codex)
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", codex)
+
+    def test_claude_bounded_uses_noninteractive_tool_allowlist(self):
+        agent = base_agent("claude-code", "patch_only", "bounded")
+        agent["allowed_tools"] = ["Bash(python -m pytest *)"]
+        argv = list(self.build(agent).argv)
+        self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        tools = argv[argv.index("--tools") + 1]
+        allowed = argv[argv.index("--allowedTools") + 1]
+        self.assertIn("Edit", tools)
+        self.assertIn("Write", tools)
+        self.assertIn("Bash", tools)
+        self.assertIn("Bash(python -m pytest *)", allowed)
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+
+    def test_claude_stream_decoder_and_tool_events(self):
+        lines = [
+            json.dumps({"type": "system", "subtype": "init", "session_id": "s"}),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "id": "tool-1", "name": "Read", "input": {}}
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "tool-1", "content": "ok"}
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "final",
+                    "session_id": "s",
+                    "num_turns": 2,
+                }
+            ),
+        ]
+        decoded = decode_harness_output("claude-code", "\n".join(lines))
+        self.assertEqual(decoded.text, "final")
+        self.assertIsNone(decoded.error)
+        self.assertEqual(decoded.metadata["session_id"], "s")
+        self.assertEqual(
+            normalize_harness_stream_line("claude-code", lines[1])[0]["event"],
+            "tool_started",
+        )
+        self.assertEqual(
+            normalize_harness_stream_line("claude-code", lines[2])[0]["event"],
+            "tool_finished",
+        )
+
+    def test_claude_permission_denial_is_failure_without_command_leak(self):
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "partial",
+                "permission_denials": [
+                    {
+                        "tool_name": "Bash",
+                        "tool_use_id": "tool-1",
+                        "tool_input": {"command": "cat /secret"},
+                    }
+                ],
+            }
+        )
+        decoded = decode_harness_output("claude-code", stdout)
+        self.assertIn("denied tools: Bash", decoded.error)
+        self.assertEqual(
+            decoded.metadata["permission_denials"],
+            [{"tool_name": "Bash", "tool_use_id": "tool-1"}],
+        )
+        self.assertNotIn("secret", json.dumps(decoded.metadata))
 
     def test_codex_dangerous_escape_hatch_removes_native_sandbox(self):
         agent = base_agent("codex-cli", "patch_only", "unattended")
@@ -138,6 +228,31 @@ class HarnessAdapterTests(unittest.TestCase):
                 decoded = decode_harness_output("grok-build", stdout)
                 self.assertIn(stop_reason, decoded.error)
 
+    def test_grok_cancelled_preserves_correlation_metadata(self):
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "text", "data": "partial"}),
+                json.dumps(
+                    {
+                        "type": "end",
+                        "stopReason": "Cancelled",
+                        "sessionId": "session-1",
+                        "requestId": "request-1",
+                    }
+                ),
+            ]
+        )
+        decoded = decode_harness_output("grok-build", stdout)
+        self.assertIn("Cancelled", decoded.error)
+        self.assertEqual(
+            decoded.metadata,
+            {
+                "stopReason": "Cancelled",
+                "sessionId": "session-1",
+                "requestId": "request-1",
+            },
+        )
+
     def test_codex_jsonl_decoder_extracts_final_message(self):
         stdout = "\n".join(
             [
@@ -154,6 +269,7 @@ class HarnessAdapterTests(unittest.TestCase):
         decoded = decode_harness_output("codex-cli", stdout)
         self.assertEqual(decoded.text, "final response")
         self.assertIsNone(decoded.error)
+        self.assertEqual(decoded.metadata["thread_id"], "t")
 
 
 if __name__ == "__main__":

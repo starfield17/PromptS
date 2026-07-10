@@ -1,16 +1,22 @@
 {
   "run_id": "example-run",
+  "failure_policy": "collect_all",
+  "success_policy": "require_all",
   "defaults": {
     "timeout_sec": 600,
+    "idle_timeout_sec": 180,
+    "max_files_changed": 50,
+    "max_workspace_files": 25000,
+    "max_workspace_bytes": 1073741824,
     "mode": "read_only",
     "harness": "fake",
-    "approval_policy": "default",
     "model": "fake-cheap"
   },
   "agents": [
     {
       "id": "repo-map",
       "goal": "Map the repository structure and identify likely test locations.",
+      "source_root": ".",
       "allowed_paths": ["**"],
       "deny_paths": [".env*", ".git/**", "secrets/**"],
       "return": ["summary", "file_refs", "recommendations"],

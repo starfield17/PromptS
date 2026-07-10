@@ -4,6 +4,7 @@ import importlib.util
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -65,9 +66,27 @@ with open(capture_path, "w", encoding="utf-8") as handle:
         "pwd": os.environ.get("PWD"),
     }}, handle)
 
-print("SUBAGENT_RESULT_JSON_START")
-print(json.dumps({{"summary": "fake claude completed", "files_read": [], "files_changed": [], "tests_run": [], "risks": [], "recommendations": []}}))
-print("SUBAGENT_RESULT_JSON_END")
+payload = {{"summary": "fake claude completed", "files_read": [], "files_changed": [], "tests_run": [], "risks": [], "recommendations": []}}
+text = "SUBAGENT_RESULT_JSON_START\\n" + json.dumps(payload) + "\\nSUBAGENT_RESULT_JSON_END"
+print(json.dumps({{"type": "system", "subtype": "init", "session_id": "fake-claude-session"}}))
+print(json.dumps({{"type": "assistant", "message": {{"content": [{{"type": "tool_use", "id": "tool-1", "name": "Read", "input": {{"file_path": "/secret"}}}}]}}}}))
+print(json.dumps({{"type": "user", "message": {{"content": [{{"type": "tool_result", "tool_use_id": "tool-1", "content": "redacted"}}]}}}}))
+print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": text, "session_id": "fake-claude-session", "num_turns": 1}}))
+""",
+            encoding="utf-8",
+        )
+        fake_claude.chmod(0o755)
+        return fake_claude
+
+    def make_slow_fake_claude(self, bin_dir):
+        fake_claude = bin_dir / "claude"
+        fake_claude.write_text(
+            f"""#!{sys.executable}
+import json
+import time
+
+print(json.dumps({{"type": "system", "subtype": "init", "session_id": "slow"}}), flush=True)
+time.sleep(60)
 """,
             encoding="utf-8",
         )
@@ -103,7 +122,21 @@ text = "SUBAGENT_RESULT_JSON_START\\n" + json.dumps(payload) + "\\nSUBAGENT_RESU
 print(json.dumps({{"type": "future_event", "data": "ignored"}}))
 print(json.dumps({{"type": "text", "data": text[:20]}}))
 print(json.dumps({{"type": "text", "data": text[20:]}}))
-print(json.dumps({{"type": "end", "stopReason": "EndTurn", "sessionId": "fake-session"}}))
+print(json.dumps({{"type": "end", "stopReason": "EndTurn", "sessionId": "fake-session", "requestId": "fake-request"}}))
+""",
+            encoding="utf-8",
+        )
+        fake_grok.chmod(0o755)
+        return fake_grok
+
+    def make_cancelled_fake_grok(self, bin_dir):
+        fake_grok = bin_dir / "grok"
+        fake_grok.write_text(
+            f"""#!{sys.executable}
+import json
+
+print(json.dumps({{"type": "text", "data": "initial announcement"}}))
+print(json.dumps({{"type": "end", "stopReason": "Cancelled", "sessionId": "cancelled-session", "requestId": "cancelled-request"}}))
 """,
             encoding="utf-8",
         )
@@ -185,6 +218,47 @@ sys.exit(7)
                 }
             )
 
+    def test_claude_bounded_validation_and_defaults(self):
+        runner = load_runner_module()
+        packet = runner.validate_and_normalize(
+            {
+                "run_id": "bounded-default",
+                "agents": [
+                    {
+                        "id": "a",
+                        "goal": "g",
+                        "harness": "claude-code",
+                        "mode": "patch_only",
+                        "allowed_paths": ["**"],
+                        "allowed_tools": ["Bash(python -m pytest *)"],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(packet["agents"][0]["approval_policy"], "bounded")
+        self.assertEqual(packet["agents"][0]["idle_timeout_sec"], 180)
+        self.assertEqual(packet["agents"][0]["max_files_changed"], 50)
+
+        invalid_agents = [
+            {"harness": "claude-code", "approval_policy": "default"},
+            {"harness": "opencode", "approval_policy": "bounded"},
+            {
+                "harness": "claude-code",
+                "approval_policy": "bounded",
+                "allowed_tools": ["Bash(*)"],
+            },
+        ]
+        for index, fields in enumerate(invalid_agents):
+            with self.subTest(fields=fields), self.assertRaises(runner.RunnerError):
+                runner.validate_and_normalize(
+                    {
+                        "run_id": f"invalid-{index}",
+                        "agents": [
+                            {"id": "a", "goal": "g", "allowed_paths": ["**"], **fields}
+                        ],
+                    }
+                )
+
     def test_fake_read_only_agent_completes_and_summary_is_generated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -210,6 +284,7 @@ sys.exit(7)
             result = json.loads(result_path.read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["summary"], "Fake read-only completed.")
+            self.assertEqual(result["harness_metadata"], {})
             self.assertTrue(summary_path.exists())
 
     def test_fake_patch_only_agent_creates_patch(self):
@@ -243,6 +318,131 @@ sys.exit(7)
             self.assertEqual(result["policy"]["status"], "passed")
             self.assertIn("tests/test_generated.py", (agent_dir / "patch.diff").read_text(encoding="utf-8"))
 
+    def test_failed_and_no_change_patch_jobs_do_not_create_patch_artifacts(self):
+        for fake_fail, expected_status in ((True, "failed"), (False, "completed")):
+            with self.subTest(fake_fail=fake_fail), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                init_git_repo(root)
+                task = self.write_tasks(
+                    root,
+                    {
+                        "run_id": "no-patch",
+                        "defaults": {"harness": "fake", "mode": "patch_only"},
+                        "agents": [
+                            {
+                                "id": "patcher",
+                                "goal": "Return without changes.",
+                                "allowed_paths": ["**"],
+                                "fake_fail": fake_fail,
+                            }
+                        ],
+                    },
+                )
+                process = run_cmd([sys.executable, str(RUNNER), "run", str(task), "--wait"], root)
+                self.assertEqual(process.returncode, 1 if fake_fail else 0)
+                agent_dir = root / ".subagents" / "no-patch" / "patcher"
+                result = json.loads((agent_dir / "result.json").read_text())
+                self.assertEqual(result["status"], expected_status)
+                self.assertIsNone(result["patch_path"])
+                self.assertIsNone(result["patch_sha256"])
+                self.assertIsNone(result["policy"])
+                self.assertFalse((agent_dir / "patch.diff").exists())
+
+    def test_partial_success_policies(self):
+        for success_policy, expected_code in (("require_all", 1), ("require_any", 0)):
+            with self.subTest(success_policy=success_policy), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = self.write_tasks(
+                    root,
+                    {
+                        "run_id": "partial",
+                        "success_policy": success_policy,
+                        "agents": [
+                            {"id": "ok", "goal": "ok", "allowed_paths": ["**"]},
+                            {
+                                "id": "bad",
+                                "goal": "bad",
+                                "allowed_paths": ["**"],
+                                "fake_fail": True,
+                            },
+                        ],
+                    },
+                )
+                process = run_cmd([sys.executable, str(RUNNER), "run", str(task), "--wait"], root)
+                self.assertEqual(process.returncode, expected_code)
+                aggregate = json.loads((root / ".subagents" / "partial" / "result.json").read_text())
+                self.assertEqual(aggregate["status"], "partial_success")
+                self.assertEqual(aggregate["success_policy_satisfied"], expected_code == 0)
+
+    def test_fail_fast_cancels_queued_agents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = self.write_tasks(
+                root,
+                {
+                    "run_id": "fail-fast",
+                    "failure_policy": "fail_fast",
+                    "agents": [
+                        {
+                            "id": "bad",
+                            "goal": "bad",
+                            "allowed_paths": ["**"],
+                            "fake_fail": True,
+                        },
+                        {"id": "queued", "goal": "queued", "allowed_paths": ["**"]},
+                    ],
+                },
+            )
+            process = run_cmd(
+                [sys.executable, str(RUNNER), "run", str(task), "--wait", "--max-concurrency", "1"],
+                root,
+            )
+            self.assertEqual(process.returncode, 1)
+            aggregate = json.loads((root / ".subagents" / "fail-fast" / "result.json").read_text())
+            statuses = {item["agent_id"]: item["status"] for item in aggregate["agents"]}
+            self.assertEqual(statuses, {"bad": "failed", "queued": "cancelled"})
+
+    def test_unborn_repository_runs_read_and_patch_agents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_cmd(["git", "init"], root)
+            (root / "source.txt").write_text("source\n", encoding="utf-8")
+            task = self.write_tasks(
+                root,
+                {
+                    "run_id": "unborn",
+                    "defaults": {"harness": "fake"},
+                    "agents": [
+                        {
+                            "id": "reader",
+                            "mode": "read_only",
+                            "goal": "Inspect the repository.",
+                            "allowed_paths": ["**"],
+                            "fake_response": {"summary": "read completed"},
+                        },
+                        {
+                            "id": "patcher",
+                            "mode": "patch_only",
+                            "goal": "Create a test file.",
+                            "allowed_paths": ["tests/**"],
+                            "fake_patch": {
+                                "path": "tests/test_generated.py",
+                                "content": "def test_generated():\n    assert True\n",
+                            },
+                        },
+                    ],
+                },
+            )
+            process = run_cmd([sys.executable, str(RUNNER), "run", str(task), "--wait"], root)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            run_dir = root / ".subagents" / "unborn"
+            reader = json.loads((run_dir / "reader" / "result.json").read_text())
+            patcher = json.loads((run_dir / "patcher" / "result.json").read_text())
+            self.assertEqual(reader["status"], "completed")
+            self.assertEqual(patcher["status"], "completed")
+            self.assertIn("tests/test_generated.py", (run_dir / "patcher" / "patch.diff").read_text())
+            self.assertNotEqual(run_cmd(["git", "rev-parse", "--verify", "HEAD"], root).returncode, 0)
+
     def test_fake_patch_only_denied_path_becomes_policy_failed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -258,7 +458,6 @@ sys.exit(7)
                             "mode": "patch_only",
                             "goal": "Touch a denied file.",
                             "allowed_paths": ["**"],
-                            "deny_paths": [".env*"],
                             "fake_patch": {"path": ".env", "content": "TOKEN=bad\n"},
                         }
                     ],
@@ -273,6 +472,38 @@ sys.exit(7)
             )
             self.assertEqual(result["status"], "policy_failed")
             self.assertEqual(result["policy"]["status"], "failed")
+
+    def test_max_files_changed_blocks_patch_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            init_git_repo(root)
+            task = self.write_tasks(
+                root,
+                {
+                    "run_id": "file-limit",
+                    "defaults": {"harness": "fake", "mode": "patch_only"},
+                    "agents": [
+                        {
+                            "id": "patcher",
+                            "goal": "Create two files.",
+                            "allowed_paths": ["tests/**"],
+                            "max_files_changed": 1,
+                            "fake_patches": [
+                                {"path": "tests/one.py", "content": "one = 1\n"},
+                                {"path": "tests/two.py", "content": "two = 2\n"},
+                            ],
+                        }
+                    ],
+                },
+            )
+            process = run_cmd([sys.executable, str(RUNNER), "run", str(task), "--wait"], root)
+            self.assertEqual(process.returncode, 1)
+            agent_dir = root / ".subagents" / "file-limit" / "patcher"
+            result = json.loads((agent_dir / "result.json").read_text())
+            self.assertEqual(result["status"], "policy_failed")
+            self.assertIn("exceeds max_files_changed", result["error"])
+            self.assertIsNone(result["patch_path"])
+            self.assertFalse((agent_dir / "patch.diff").exists())
 
     def test_fake_patch_rejects_paths_outside_workspace(self):
         for path_kind in ("absolute", "parent"):
@@ -342,6 +573,58 @@ sys.exit(7)
             self.assertEqual(result["status"], "output_limit")
             self.assertIn("output truncated", (agent_dir / "stdout.log").read_text())
 
+    def test_non_git_source_root_and_copy_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            (project / "inside.txt").write_text("inside\n")
+            (root / "outside.txt").write_text("outside\n")
+            task = self.write_tasks(
+                root,
+                {
+                    "run_id": "source-root",
+                    "agents": [
+                        {
+                            "id": "reader",
+                            "goal": "read",
+                            "source_root": "project",
+                            "allowed_paths": ["**"],
+                        }
+                    ],
+                },
+            )
+            process = run_cmd([sys.executable, str(RUNNER), "run", str(task), "--wait"], root)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            worktree = root / ".subagents" / "source-root" / "reader" / "worktree"
+            self.assertTrue((worktree / "inside.txt").is_file())
+            self.assertFalse((worktree / "outside.txt").exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "one.txt").write_text("1")
+            (root / "two.txt").write_text("2")
+            task = self.write_tasks(
+                root,
+                {
+                    "run_id": "copy-limit",
+                    "agents": [
+                        {
+                            "id": "reader",
+                            "goal": "read",
+                            "allowed_paths": ["**"],
+                            "max_workspace_files": 1,
+                        }
+                    ],
+                },
+            )
+            process = run_cmd([sys.executable, str(RUNNER), "run", str(task), "--wait"], root)
+            self.assertEqual(process.returncode, 1)
+            result = json.loads(
+                (root / ".subagents" / "copy-limit" / "reader" / "result.json").read_text()
+            )
+            self.assertIn("exceeds copy limits", result["error"])
+
     def test_collect_and_status_read_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -390,7 +673,7 @@ sys.exit(7)
             self.assertEqual(result["status"], "failed")
             self.assertIn("Harness command not found: opencode.", result["error"])
 
-    def test_claude_default_uses_isolated_home_and_no_session_persistence(self):
+    def test_claude_bounded_default_uses_isolated_home_and_no_session_persistence(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "repo"
@@ -425,7 +708,21 @@ sys.exit(7)
             self.assertNotEqual(capture["home"], str(host_home))
             self.assertTrue(capture["home"].endswith(".subagents/claude-default/reader/home"))
             self.assertIn("--no-session-persistence", capture["argv"])
+            self.assertEqual(
+                capture["argv"][capture["argv"].index("--permission-mode") + 1],
+                "dontAsk",
+            )
+            self.assertIn("--output-format", capture["argv"])
             self.assertNotIn("--dangerously-skip-permissions", capture["argv"])
+            result = json.loads(
+                (root / ".subagents" / "claude-default" / "reader" / "result.json").read_text()
+            )
+            self.assertEqual(result["harness_metadata"]["session_id"], "fake-claude-session")
+            events = (
+                root / ".subagents" / "claude-default" / "reader" / "events.jsonl"
+            ).read_text()
+            self.assertIn('"event": "tool_started"', events)
+            self.assertNotIn("/secret", events)
 
     def test_claude_host_home_and_permission_flags_are_opt_in(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -472,6 +769,114 @@ sys.exit(7)
             self.assertIn("--agent", capture["argv"])
             self.assertIn("reviewer", capture["argv"])
 
+    @unittest.skipIf(os.name != "posix", "process-group cancellation requires POSIX")
+    def test_status_and_cancel_running_and_queued_agents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "repo"
+            root.mkdir()
+            bin_dir = base / "bin"
+            bin_dir.mkdir()
+            self.make_slow_fake_claude(bin_dir)
+            task = self.write_tasks(
+                root,
+                {
+                    "run_id": "cancel-live",
+                    "defaults": {
+                        "harness": "claude-code",
+                        "mode": "read_only",
+                    },
+                    "agents": [
+                        {"id": "running", "goal": "wait", "allowed_paths": ["**"]},
+                        {"id": "queued", "goal": "wait", "allowed_paths": ["**"]},
+                    ],
+                },
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            runner_process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "run",
+                    str(task),
+                    "--wait",
+                    "--max-concurrency",
+                    "1",
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            runtime_path = root / ".subagents" / "cancel-live" / "running" / "runtime.json"
+            runtime = None
+            for _ in range(100):
+                if runtime_path.exists():
+                    runtime = json.loads(runtime_path.read_text())
+                    if runtime.get("status") == "running":
+                        break
+                time.sleep(0.05)
+            self.assertIsNotNone(runtime)
+            assert runtime is not None
+            pid = int(runtime["pid"])
+            status = run_cmd(
+                [sys.executable, str(RUNNER), "status", ".subagents/cancel-live"],
+                root,
+                env=env,
+            )
+            self.assertIn("Status: running", status.stdout)
+            self.assertIn(f"pid={pid}", status.stdout)
+            self.assertIn("queued: queued", status.stdout)
+
+            cancel = run_cmd(
+                [sys.executable, str(RUNNER), "cancel", ".subagents/cancel-live"],
+                root,
+                env=env,
+            )
+            self.assertEqual(cancel.returncode, 0, cancel.stderr)
+            self.assertIn("signalled=1", cancel.stdout)
+            runner_process.communicate(timeout=10)
+            aggregate = json.loads(
+                (root / ".subagents" / "cancel-live" / "result.json").read_text()
+            )
+            statuses = {item["agent_id"]: item["status"] for item in aggregate["agents"]}
+            self.assertEqual(statuses, {"running": "cancelled", "queued": "cancelled"})
+            self.assertFalse(Path(f"/proc/{pid}").exists())
+
+    def test_runner_reports_idle_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "repo"
+            root.mkdir()
+            bin_dir = base / "bin"
+            bin_dir.mkdir()
+            self.make_slow_fake_claude(bin_dir)
+            task = self.write_tasks(
+                root,
+                {
+                    "run_id": "idle-timeout",
+                    "defaults": {
+                        "harness": "claude-code",
+                        "mode": "read_only",
+                        "idle_timeout_sec": 1,
+                    },
+                    "agents": [
+                        {"id": "reader", "goal": "wait", "allowed_paths": ["**"]}
+                    ],
+                },
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            process = run_cmd([sys.executable, str(RUNNER), "run", str(task), "--wait"], root, env=env)
+            self.assertEqual(process.returncode, 1)
+            result = json.loads(
+                (root / ".subagents" / "idle-timeout" / "reader" / "result.json").read_text()
+            )
+            self.assertEqual(result["status"], "idle_timeout")
+            self.assertIn("no activity for 1 seconds", result["error"])
+
     def test_grok_adapter_runs_streaming_json_and_preserves_explicit_host_home(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -512,6 +917,14 @@ sys.exit(7)
             )
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["summary"], "fake grok completed")
+            self.assertEqual(
+                result["harness_metadata"],
+                {
+                    "stopReason": "EndTurn",
+                    "sessionId": "fake-session",
+                    "requestId": "fake-request",
+                },
+            )
             capture = json.loads(capture_path.read_text())
             self.assertEqual(capture["home"], str(host_home))
             self.assertEqual(capture["grok_home"], str(host_grok_home))
@@ -553,6 +966,46 @@ sys.exit(7)
             self.assertEqual(result["status"], "failed")
             self.assertIn("simulated Grok API failure", result["error"])
             self.assertIn("harness exited with code 7", result["error"])
+
+    def test_grok_cancelled_result_preserves_correlation_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "repo"
+            root.mkdir()
+            bin_dir = base / "bin"
+            bin_dir.mkdir()
+            self.make_cancelled_fake_grok(bin_dir)
+            task = self.write_tasks(
+                root,
+                {
+                    "run_id": "grok-cancelled",
+                    "defaults": {"harness": "grok-build", "mode": "read_only"},
+                    "agents": [
+                        {"id": "reader", "goal": "Run cancelled Grok.", "allowed_paths": ["**"]}
+                    ],
+                },
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            process = run_cmd(
+                [sys.executable, str(RUNNER), "run", str(task), "--wait"],
+                root,
+                env=env,
+            )
+            self.assertEqual(process.returncode, 1, process.stderr)
+            result = json.loads(
+                (root / ".subagents" / "grok-cancelled" / "reader" / "result.json").read_text()
+            )
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("Cancelled", result["error"])
+            self.assertEqual(
+                result["harness_metadata"],
+                {
+                    "stopReason": "Cancelled",
+                    "sessionId": "cancelled-session",
+                    "requestId": "cancelled-request",
+                },
+            )
 
     def test_grok_isolated_home_overrides_inherited_grok_home(self):
         with tempfile.TemporaryDirectory() as tmp:

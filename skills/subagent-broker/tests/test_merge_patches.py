@@ -97,8 +97,10 @@ class MergePatchTests(unittest.TestCase):
 
             check = run([sys.executable, str(MERGE), "--check", str(patch)], subdir)
             self.assertEqual(check.returncode, 0, check.stderr.decode(errors="replace"))
+            self.assertIn(b"Patch check passed: 1 files", check.stdout)
             apply = run([sys.executable, str(MERGE), "--apply", str(patch)], subdir)
             self.assertEqual(apply.returncode, 0, apply.stderr.decode(errors="replace"))
+            self.assertIn(b"Patch applied: 1 files", apply.stdout)
             self.assertEqual(
                 (repo / "file.txt").read_text(), "user change\nagent change\n"
             )

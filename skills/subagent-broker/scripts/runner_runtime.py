@@ -12,7 +12,9 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -26,6 +28,9 @@ class RunnerRuntimeError(Exception):
 
 
 EventWriter = Callable[..., None]
+ActivityWriter = Callable[[str, int], None]
+LineWriter = Callable[[str], None]
+ProcessStartedWriter = Callable[[int, int, str | None], None]
 
 
 @dataclass(frozen=True)
@@ -295,6 +300,48 @@ def copy_non_git_workspace(source: Path, destination: Path, deny_patterns: list[
     _overlay_visible_paths(source, destination, files_to_copy)
 
 
+def preflight_non_git_workspace(
+    source: Path,
+    deny_patterns: list[str],
+    max_files: int,
+    max_bytes: int,
+) -> tuple[int, int]:
+    file_count = 0
+    total_bytes = 0
+    for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+        current = Path(dirpath)
+        kept_dirs: list[str] = []
+        for dirname in dirnames:
+            path = current / dirname
+            relative = path.relative_to(source).as_posix()
+            if _is_denied(relative, deny_patterns):
+                continue
+            if path.is_symlink():
+                filenames.append(dirname)
+            else:
+                kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
+        for filename in filenames:
+            path = current / filename
+            relative = path.relative_to(source).as_posix()
+            if _is_denied(relative, deny_patterns):
+                continue
+            try:
+                size = path.lstat().st_size
+            except OSError as exc:
+                raise RunnerRuntimeError(f"could not inspect non-Git workspace path: {path}") from exc
+            file_count += 1
+            total_bytes += size
+            if file_count > max_files or total_bytes > max_bytes:
+                raise RunnerRuntimeError(
+                    "non-Git workspace exceeds copy limits "
+                    f"({file_count} files, {total_bytes} bytes; limits: "
+                    f"{max_files} files, {max_bytes} bytes); set source_root to a project "
+                    "subdirectory or explicitly raise the limits"
+                )
+    return file_count, total_bytes
+
+
 def _manifest_entry(path: Path) -> dict[str, str]:
     if path.is_symlink():
         mode = "120000"
@@ -369,16 +416,34 @@ def export_working_tree_baseline(
     source_objects = _resolve_git_path(repo_root, source_objects_raw)
     env = _temporary_index_env(index_path, object_dir, source_objects)
     try:
-        head = os.fsdecode(_git_output(["rev-parse", "HEAD"], repo_root)).strip()
-        _git_output(["read-tree", head], repo_root, env=env)
+        head_process = run_sync(["git", "rev-parse", "--verify", "--quiet", "HEAD"], repo_root)
+        if head_process.returncode == 0:
+            head = os.fsdecode(head_process.stdout).strip()
+            _git_output(["read-tree", head], repo_root, env=env)
+            staged_entries = _git_output(["ls-files", "--stage", "-z"], repo_root, env=env)
+            tracked_changes = _nul_paths(
+                _git_output(
+                    ["diff", "--no-renames", "--name-only", "-z", "HEAD", "--"],
+                    repo_root,
+                )
+            )
+        else:
+            symbolic_head = run_sync(["git", "symbolic-ref", "--quiet", "HEAD"], repo_root)
+            if symbolic_head.returncode != 0:
+                raise RunnerRuntimeError("Git repository has no valid HEAD or unborn branch")
+            _git_output(["read-tree", "--empty"], repo_root, env=env)
+            staged_entries = _git_output(["ls-files", "--stage", "-z"], repo_root)
+            tracked_changes = [
+                path
+                for path in _nul_paths(
+                    _git_output(["ls-files", "--cached", "-z", "--"], repo_root)
+                )
+                if os.path.lexists(repo_root / path)
+            ]
 
-        staged_entries = _git_output(["ls-files", "--stage", "-z"], repo_root, env=env)
         if any(entry.startswith(b"160000 ") for entry in staged_entries.split(b"\0") if entry):
             raise RunnerRuntimeError("repositories containing Git submodules are not supported")
 
-        tracked_changes = _nul_paths(
-            _git_output(["diff", "--no-renames", "--name-only", "-z", "HEAD", "--"], repo_root)
-        )
         untracked = _nul_paths(
             _git_output(["ls-files", "--others", "--exclude-standard", "-z", "--"], repo_root)
         )
@@ -553,6 +618,8 @@ def prepare_workspace(
     agent_dir: Path,
     deny_patterns: list[str],
     mode: str,
+    max_workspace_files: int = 25_000,
+    max_workspace_bytes: int = 1_073_741_824,
 ) -> WorkspaceContext:
     repo_root = git_root(source_cwd)
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -560,6 +627,12 @@ def prepare_workspace(
         if mode == "patch_only":
             raise RunnerRuntimeError("patch_only requires a Git repository")
         worktree = agent_dir / "worktree"
+        preflight_non_git_workspace(
+            source_cwd.resolve(),
+            deny_patterns,
+            max_workspace_files,
+            max_workspace_bytes,
+        )
         copy_non_git_workspace(source_cwd.resolve(), worktree, deny_patterns)
         return WorkspaceContext(
             None,
@@ -731,8 +804,12 @@ async def _capture_stream(
     path: Path,
     limit: int,
     overflow: asyncio.Event,
+    stream_name: str,
+    activity_writer: ActivityWriter | None,
+    line_writer: LineWriter | None,
 ) -> _CapturedStream:
     captured = bytearray()
+    line_buffer = bytearray()
     total = 0
     try:
         while True:
@@ -742,17 +819,41 @@ async def _capture_stream(
             total += len(chunk)
             remaining = limit - len(captured)
             if remaining > 0:
-                captured.extend(chunk[:remaining])
+                persisted = chunk[:remaining]
+                captured.extend(persisted)
+                append_bytes_no_follow(path, persisted)
+                if line_writer is not None:
+                    line_buffer.extend(persisted)
+                    while b"\n" in line_buffer:
+                        raw_line, _, remainder = line_buffer.partition(b"\n")
+                        line_buffer = bytearray(remainder)
+                        line_writer(raw_line.decode("utf-8", errors="replace"))
+            if activity_writer is not None:
+                activity_writer(stream_name, total)
             if total > limit:
                 overflow.set()
     finally:
+        if line_writer is not None and line_buffer:
+            line_writer(bytes(line_buffer).decode("utf-8", errors="replace"))
         truncated = total > limit
         data = bytes(captured)
-        persisted = data
         if truncated:
-            persisted += b"\n[output truncated: max_output_bytes exceeded]\n"
-        atomic_write_bytes(path, persisted)
+            append_bytes_no_follow(path, b"\n[output truncated: max_output_bytes exceeded]\n")
     return _CapturedStream(data, total, truncated)
+
+
+def process_start_token(pid: int) -> str | None:
+    if sys.platform != "linux":
+        return None
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    closing_paren = raw.rfind(")")
+    if closing_paren < 0:
+        return None
+    fields_after_command = raw[closing_paren + 2 :].split()
+    return fields_after_command[19] if len(fields_after_command) > 19 else None
 
 
 def _signal_process_group(
@@ -769,7 +870,7 @@ def _signal_process_group(
         process.kill()
 
 
-def _process_group_exists(process_group_id: int) -> bool:
+def process_group_exists(process_group_id: int) -> bool:
     if os.name != "posix":
         return False
     try:
@@ -803,8 +904,16 @@ async def run_external_harness(
     stdout_path: Path,
     stderr_path: Path,
     event_writer: EventWriter,
+    *,
+    idle_timeout_sec: int = 180,
+    heartbeat_sec: int = 15,
+    process_started_writer: ProcessStartedWriter | None = None,
+    activity_writer: ActivityWriter | None = None,
+    stdout_line_writer: LineWriter | None = None,
 ) -> ProcessOutcome:
     event_writer("command", argv=list(invocation.logged_argv))
+    atomic_write_bytes(stdout_path, b"")
+    atomic_write_bytes(stderr_path, b"")
     subprocess_kwargs: dict[str, Any] = {"start_new_session": True} if os.name == "posix" else {}
     try:
         process = await asyncio.create_subprocess_exec(
@@ -831,28 +940,97 @@ async def run_external_harness(
 
     assert process.stdout is not None
     assert process.stderr is not None
+    process_group_id = process.pid
+    wait_task = asyncio.create_task(process.wait())
+    if process_started_writer is not None:
+        try:
+            process_started_writer(
+                process.pid,
+                process_group_id,
+                process_start_token(process.pid),
+            )
+        except Exception as exc:
+            await _terminate_process_group(process, process_group_id, wait_task)
+            raise RunnerRuntimeError("could not persist harness process state") from exc
+
+    last_activity = [time.monotonic()]
+
+    def record_activity(stream_name: str, total_bytes: int) -> None:
+        last_activity[0] = time.monotonic()
+        if activity_writer is not None:
+            activity_writer(stream_name, total_bytes)
+
+    async def watch_idle() -> None:
+        last_heartbeat = time.monotonic()
+        while True:
+            await asyncio.sleep(1.0)
+            now = time.monotonic()
+            if now - last_activity[0] >= idle_timeout_sec:
+                return
+            if now - last_heartbeat >= heartbeat_sec:
+                event_writer(
+                    "heartbeat",
+                    pid=process.pid,
+                    idle_sec=round(now - last_activity[0], 3),
+                )
+                last_heartbeat = now
+
     overflow = asyncio.Event()
     stdout_task = asyncio.create_task(
-        _capture_stream(process.stdout, stdout_path, max_output_bytes, overflow)
+        _capture_stream(
+            process.stdout,
+            stdout_path,
+            max_output_bytes,
+            overflow,
+            "stdout",
+            record_activity,
+            stdout_line_writer,
+        )
     )
     stderr_task = asyncio.create_task(
-        _capture_stream(process.stderr, stderr_path, max_output_bytes, overflow)
+        _capture_stream(
+            process.stderr,
+            stderr_path,
+            max_output_bytes,
+            overflow,
+            "stderr",
+            record_activity,
+            None,
+        )
     )
-    wait_task = asyncio.create_task(process.wait())
     overflow_task = asyncio.create_task(overflow.wait())
+    idle_task = asyncio.create_task(watch_idle())
     capture_future = asyncio.gather(stdout_task, stderr_task)
-    process_group_id = process.pid
+    capture_failed = asyncio.Event()
+
+    def record_capture_failure(future: asyncio.Future[Any]) -> None:
+        if future.cancelled():
+            return
+        with contextlib.suppress(asyncio.CancelledError):
+            if future.exception() is not None:
+                capture_failed.set()
+
+    capture_future.add_done_callback(record_capture_failure)
+    capture_failed_task = asyncio.create_task(capture_failed.wait())
     error_kind: str | None = None
     error: str | None = None
     try:
         done, _ = await asyncio.wait(
-            {wait_task, overflow_task},
+            {wait_task, overflow_task, idle_task, capture_failed_task},
             timeout=timeout_sec,
             return_when=asyncio.FIRST_COMPLETED,
         )
         if overflow_task in done and overflow.is_set():
             error_kind = "output_limit"
             error = "stdout or stderr exceeded max_output_bytes"
+            await _terminate_process_group(process, process_group_id, wait_task)
+        elif idle_task in done and wait_task not in done:
+            error_kind = "idle_timeout"
+            error = f"harness produced no activity for {idle_timeout_sec} seconds"
+            await _terminate_process_group(process, process_group_id, wait_task)
+        elif capture_failed_task in done and capture_failed.is_set():
+            error_kind = "capture_error"
+            error = "failed to persist or decode harness output stream"
             await _terminate_process_group(process, process_group_id, wait_task)
         elif wait_task not in done:
             error_kind = "timeout"
@@ -874,7 +1052,12 @@ async def run_external_harness(
                 raise RunnerRuntimeError(
                     "harness descendants kept stdout or stderr open after termination"
                 ) from exc
-        if _process_group_exists(process_group_id):
+        except Exception as exc:
+            await _terminate_process_group(process, process_group_id, wait_task)
+            raise RunnerRuntimeError(
+                error or "failed to persist or decode harness output stream"
+            ) from exc
+        if process_group_exists(process_group_id):
             await _terminate_process_group(process, process_group_id, wait_task)
             event_writer("descendants_terminated", process_group_id=process_group_id)
         if (stdout_capture.truncated or stderr_capture.truncated) and error_kind is None:
@@ -914,5 +1097,8 @@ async def run_external_harness(
         raise
     finally:
         overflow_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await overflow_task
+        idle_task.cancel()
+        capture_failed_task.cancel()
+        for task in (overflow_task, idle_task, capture_failed_task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task

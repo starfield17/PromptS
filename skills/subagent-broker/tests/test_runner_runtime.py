@@ -132,6 +132,57 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertEqual(run(["git", "status", "--porcelain"], worktree).stdout, b"")
             self.assertNotEqual(run(["git", "cat-file", "-e", object_id], repo).returncode, 0)
 
+    def test_unborn_repository_baseline_mirrors_visible_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = base / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+            (repo / "staged.txt").write_text("staged\n", encoding="utf-8")
+            (repo / "gone.txt").write_text("gone\n", encoding="utf-8")
+            (repo / ".env").write_text("SECRET=value\n", encoding="utf-8")
+            run(["git", "add", ".gitignore", "staged.txt", "gone.txt", ".env"], repo)
+            (repo / "staged.txt").write_text("visible\n", encoding="utf-8")
+            (repo / "gone.txt").unlink()
+            (repo / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+            (repo / "build").mkdir()
+            (repo / "build" / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+            source_index = run(["git", "ls-files", "-z"], repo).stdout
+
+            context = prepare_workspace(repo, base / "agent", list(DEFAULT_DENY), "patch_only")
+            assert context.worktree is not None and context.baseline_commit is not None
+            self.assertIsNotNone(context.baseline_bundle_sha256)
+            self.assertEqual((context.worktree / "staged.txt").read_text(), "visible\n")
+            self.assertEqual((context.worktree / "untracked.txt").read_text(), "untracked\n")
+            self.assertTrue((context.worktree / ".gitignore").is_file())
+            self.assertFalse((context.worktree / "gone.txt").exists())
+            self.assertFalse((context.worktree / ".env").exists())
+            self.assertFalse((context.worktree / "build").exists())
+            self.assertEqual(run(["git", "status", "--porcelain"], context.worktree).stdout, b"")
+            self.assertNotEqual(run(["git", "rev-parse", "--verify", "HEAD"], repo).returncode, 0)
+            self.assertEqual(run(["git", "ls-files", "-z"], repo).stdout, source_index)
+
+            (context.worktree / "staged.txt").write_text("agent\n", encoding="utf-8")
+            restore_trusted_git_metadata(context)
+            changed = git_changed_paths(context.worktree, context.baseline_commit)
+            artifact = collect_git_diff(context.worktree, context.baseline_commit, changed)
+            self.assertEqual(artifact.changed_paths, ("staged.txt",))
+            self.assertIn(b"agent", artifact.data)
+
+    def test_empty_unborn_repository_creates_read_only_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = base / "repo"
+            repo.mkdir()
+            init_repo(repo)
+
+            context = prepare_workspace(repo, base / "agent", list(DEFAULT_DENY), "read_only")
+            assert context.worktree is not None and context.baseline_commit is not None
+            self.assertEqual(run(["git", "status", "--porcelain"], context.worktree).stdout, b"")
+            self.assertEqual(snapshot_files(context.worktree), {})
+            self.assertNotEqual(run(["git", "rev-parse", "--verify", "HEAD"], repo).returncode, 0)
+
     def test_agent_commit_is_diffed_against_immutable_baseline(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -253,7 +304,7 @@ class WorkspaceRuntimeTests(unittest.TestCase):
 
 
 class ProcessRuntimeTests(unittest.IsolatedAsyncioTestCase):
-    async def run_invocation(self, root, command, timeout=5, limit=10_000):
+    async def run_invocation(self, root, command, timeout=5, limit=10_000, idle=180):
         events = []
 
         def write_event(event, **fields):
@@ -269,6 +320,7 @@ class ProcessRuntimeTests(unittest.IsolatedAsyncioTestCase):
             root / "stdout.log",
             root / "stderr.log",
             write_event,
+            idle_timeout_sec=idle,
         )
         return outcome, events
 
@@ -291,6 +343,41 @@ class ProcessRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(outcome.error_kind, "timeout")
             self.assertLess(time.monotonic() - started, 3)
             self.assertTrue((root / "stdout.log").exists())
+
+    async def test_stdout_is_visible_before_process_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = asyncio.create_task(
+                self.run_invocation(
+                    root,
+                    [
+                        sys.executable,
+                        "-c",
+                        "import time; print('first', flush=True); time.sleep(1); print('last')",
+                    ],
+                )
+            )
+            for _ in range(20):
+                if (root / "stdout.log").exists() and b"first" in (root / "stdout.log").read_bytes():
+                    break
+                await asyncio.sleep(0.05)
+            self.assertIn(b"first", (root / "stdout.log").read_bytes())
+            self.assertFalse(task.done())
+            outcome, _ = await task
+            self.assertEqual(outcome.returncode, 0)
+
+    async def test_idle_timeout_terminates_process_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            started = time.monotonic()
+            outcome, _ = await self.run_invocation(
+                root,
+                ["sh", "-c", "sleep 60"],
+                timeout=10,
+                idle=1,
+            )
+            self.assertEqual(outcome.error_kind, "idle_timeout")
+            self.assertLess(time.monotonic() - started, 3)
 
     async def test_async_cancellation_terminates_and_preserves_logs(self):
         with tempfile.TemporaryDirectory() as tmp:

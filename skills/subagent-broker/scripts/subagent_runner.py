@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from harness_adapters import (  # noqa: E402
     HarnessAdapterError,
     build_harness_invocation,
     decode_harness_output,
+    normalize_harness_stream_line,
     supported_harnesses,
 )
 from policy_check import (  # noqa: E402
@@ -45,6 +47,8 @@ from runner_runtime import (  # noqa: E402
     git_changed_paths,
     git_root,
     prepare_workspace,
+    process_group_exists,
+    process_start_token,
     restore_trusted_git_metadata,
     run_external_harness,
     snapshot_files,
@@ -56,13 +60,17 @@ SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SUPPORTED_MODES = {"read_only", "patch_only"}
 UNSUPPORTED_MODES = {"direct_write", "shared_workspace", "network_sandbox", "daemon"}
 SUPPORTED_HOME_POLICIES = {"isolated", "host"}
-SUPPORTED_APPROVAL_POLICIES = {"default", "unattended"}
+SUPPORTED_APPROVAL_POLICIES = {"bounded", "default", "unattended"}
 SECRET_ENV_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|SESSION)", re.I)
 JSON_START = "SUBAGENT_RESULT_JSON_START"
 JSON_END = "SUBAGENT_RESULT_JSON_END"
 
 
 class RunnerError(Exception):
+    pass
+
+
+class UserCancelled(Exception):
     pass
 
 
@@ -154,6 +162,17 @@ def normalize_list(value: Any, field: str) -> list[str]:
     return list(value)
 
 
+def normalize_source_root(value: Any, field: str) -> str:
+    if value is None or value == ".":
+        return "."
+    if not isinstance(value, str):
+        raise RunnerError(f"{field} must be a relative directory path")
+    try:
+        return normalize_path(value)
+    except PolicyParseError as exc:
+        raise RunnerError(f"{field}: {exc}") from exc
+
+
 def validate_and_normalize(packet: dict[str, Any]) -> dict[str, Any]:
     run_id = packet.get("run_id")
     if not isinstance(run_id, str):
@@ -226,12 +245,45 @@ def validate_and_normalize(packet: dict[str, Any]) -> dict[str, Any]:
             raise RunnerError(f"agent {agent_id}: home_policy 'host' requires inherit_env true")
 
         approval_explicit = "approval_policy" in agent
-        approval_policy = agent.get("approval_policy", "default")
+        approval_policy = agent.get(
+            "approval_policy", "bounded" if harness == "claude-code" else "default"
+        )
         if not isinstance(approval_policy, str) or approval_policy not in SUPPORTED_APPROVAL_POLICIES:
             raise RunnerError(
                 f"agent {agent_id}: approval_policy must be one of "
                 f"{sorted(SUPPORTED_APPROVAL_POLICIES)}"
             )
+        if harness == "claude-code" and approval_policy == "default":
+            raise RunnerError(
+                f"agent {agent_id}: claude-code headless jobs cannot use approval_policy "
+                "'default'; use 'bounded' or explicitly opt into 'unattended'"
+            )
+        if approval_policy == "bounded" and harness != "claude-code":
+            raise RunnerError(
+                f"agent {agent_id}: approval_policy 'bounded' is only valid for claude-code"
+            )
+
+        allowed_tools = normalize_list(agent.get("allowed_tools"), f"agent {agent_id}: allowed_tools")
+        if allowed_tools and (harness != "claude-code" or approval_policy != "bounded"):
+            raise RunnerError(
+                f"agent {agent_id}: allowed_tools requires claude-code with approval_policy 'bounded'"
+            )
+        for tool in allowed_tools:
+            normalized_tool = tool.strip()
+            if normalized_tool in {"Bash", "Bash(*)"}:
+                raise RunnerError(
+                    f"agent {agent_id}: bounded Bash rules must name a command pattern"
+                )
+            if normalized_tool.startswith("Bash(") and not normalized_tool.endswith(")"):
+                raise RunnerError(f"agent {agent_id}: invalid Bash tool rule: {tool!r}")
+            if mode == "read_only" and normalized_tool.split("(", 1)[0] in {
+                "Edit",
+                "Write",
+                "NotebookEdit",
+            }:
+                raise RunnerError(
+                    f"agent {agent_id}: read_only jobs cannot allow mutating tool {tool!r}"
+                )
 
         legacy_skip = normalize_bool(
             agent.get("dangerously_skip_permissions"),
@@ -265,6 +317,10 @@ def validate_and_normalize(packet: dict[str, Any]) -> dict[str, Any]:
                     "with approval_policy"
                 )
             approval_policy = "unattended"
+        if allowed_tools and approval_policy != "bounded":
+            raise RunnerError(
+                f"agent {agent_id}: allowed_tools cannot be combined with unattended permissions"
+            )
 
         normalized = dict(agent)
         normalized.update(
@@ -274,7 +330,31 @@ def validate_and_normalize(packet: dict[str, Any]) -> dict[str, Any]:
                 "mode": mode,
                 "harness": harness,
                 "approval_policy": approval_policy,
+                "allowed_tools": allowed_tools,
                 "timeout_sec": timeout_sec,
+                "idle_timeout_sec": normalize_positive_int(
+                    agent.get("idle_timeout_sec"),
+                    f"agent {agent_id}: idle_timeout_sec",
+                    180,
+                ),
+                "max_files_changed": normalize_positive_int(
+                    agent.get("max_files_changed"),
+                    f"agent {agent_id}: max_files_changed",
+                    50,
+                ),
+                "source_root": normalize_source_root(
+                    agent.get("source_root"), f"agent {agent_id}: source_root"
+                ),
+                "max_workspace_files": normalize_positive_int(
+                    agent.get("max_workspace_files"),
+                    f"agent {agent_id}: max_workspace_files",
+                    25_000,
+                ),
+                "max_workspace_bytes": normalize_positive_int(
+                    agent.get("max_workspace_bytes"),
+                    f"agent {agent_id}: max_workspace_bytes",
+                    1_073_741_824,
+                ),
                 "max_output_bytes": max_output_bytes,
                 "allowed_paths": allowed_paths,
                 "deny_paths": deny_paths,
@@ -301,7 +381,19 @@ def validate_and_normalize(packet: dict[str, Any]) -> dict[str, Any]:
         )
         agents.append(normalized)
 
-    return {"run_id": run_id, "defaults": defaults, "agents": agents}
+    failure_policy = packet.get("failure_policy", "collect_all")
+    if failure_policy not in {"collect_all", "fail_fast"}:
+        raise RunnerError("failure_policy must be 'collect_all' or 'fail_fast'")
+    success_policy = packet.get("success_policy", "require_all")
+    if success_policy not in {"require_all", "require_any"}:
+        raise RunnerError("success_policy must be 'require_all' or 'require_any'")
+    return {
+        "run_id": run_id,
+        "defaults": defaults,
+        "failure_policy": failure_policy,
+        "success_policy": success_policy,
+        "agents": agents,
+    }
 
 
 def load_config() -> dict[str, Any]:
@@ -332,10 +424,96 @@ class EventLogger:
         )
 
 
+class RuntimeTracker:
+    def __init__(self, path: Path, events: EventLogger, harness: str) -> None:
+        self.path = path
+        self.events = events
+        self.harness = harness
+        self.active_tools: dict[str, dict[str, Any]] = {}
+        self.state: dict[str, Any] = {
+            "status": "preparing",
+            "runner_pid": os.getpid(),
+            "pid": None,
+            "pgid": None,
+            "process_start_token": None,
+            "started_at": now_iso(),
+            "last_activity_at": None,
+            "current_tool": None,
+            "tool_calls": 0,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+        }
+        self._persist()
+
+    def _persist(self) -> None:
+        write_json(self.path, self.state)
+
+    def process_started(self, pid: int, pgid: int, start_token: str | None) -> None:
+        self.state.update(
+            {
+                "status": "running",
+                "pid": pid,
+                "pgid": pgid,
+                "process_start_token": start_token,
+                "last_activity_at": now_iso(),
+            }
+        )
+        self._persist()
+
+    def activity(self, stream_name: str, total_bytes: int) -> None:
+        self.state[f"{stream_name}_bytes"] = total_bytes
+        self.state["last_activity_at"] = now_iso()
+        self._persist()
+
+    def stream_line(self, line: str) -> None:
+        for payload in normalize_harness_stream_line(self.harness, line):
+            event = str(payload.pop("event"))
+            timestamp = now_iso()
+            if event == "tool_started":
+                tool_id = str(payload.get("tool_id") or f"tool-{self.state['tool_calls'] + 1}")
+                tool = {
+                    "id": tool_id,
+                    "name": payload.get("tool_name"),
+                    "started_at": timestamp,
+                }
+                self.active_tools[tool_id] = tool
+                self.state["tool_calls"] += 1
+                self.state["current_tool"] = tool
+            elif event == "tool_finished":
+                tool_id = str(payload.get("tool_id") or "")
+                self.active_tools.pop(tool_id, None)
+                self.state["current_tool"] = next(
+                    reversed(self.active_tools.values()), None
+                )
+            self.state["last_activity_at"] = timestamp
+            self.events.write(event, **payload)
+            self._persist()
+
+    def finish(self, status: str) -> None:
+        self.state.update(
+            {
+                "status": "finished",
+                "terminal_status": status,
+                "current_tool": None,
+                "ended_at": now_iso(),
+            }
+        )
+        self._persist()
+
+
+def cancel_marker(run_dir: Path) -> Path:
+    return run_dir / "cancel.json"
+
+
+def cancellation_requested(run_dir: Path) -> bool:
+    return cancel_marker(run_dir).is_file()
+
+
 def generate_prompt(agent: dict[str, Any]) -> str:
     allowed = "\n".join(f"- {path}" for path in agent["allowed_paths"]) or "- none"
     denied = "\n".join(f"- {path}" for path in agent["effective_deny_paths"]) or "- none"
     returns = "\n".join(f"- {field}" for field in agent["return"]) or "- summary"
+    tool_rules = "\n".join(f"- {tool}" for tool in agent.get("allowed_tools", [])) or "- none"
     return f"""You are a bounded subagent launched by a parent Codex agent.
 
 Agent ID: {agent['id']}
@@ -353,6 +531,9 @@ Denied paths:
 Expected return fields:
 {returns}
 
+Explicit additional tool rules:
+{tool_rules}
+
 Rules:
 - Work only on the assigned goal.
 - Do not inspect files outside allowed paths unless necessary for imports or references.
@@ -362,6 +543,7 @@ Rules:
 - Return concise results.
 - If mode is read_only, do not modify files.
 - If mode is patch_only, edit only files under allowed paths.
+- Invoke Bash only with a command that matches an explicit allowed tool rule.
 - Do not apply patches to the parent workspace.
 
 At the end, include a final JSON object between these markers:
@@ -394,6 +576,7 @@ def initial_result(
         "model": agent.get("model"),
         "approval_policy": agent["approval_policy"],
         "source_repo_root": agent.get("source_repo_root"),
+        "source_root": agent.get("resolved_source_root"),
         "baseline_commit": None,
         "baseline_manifest_path": None,
         "baseline_manifest_sha256": None,
@@ -406,6 +589,8 @@ def initial_result(
         "tests_run": [],
         "risks": [],
         "recommendations": [],
+        "harness_metadata": {},
+        "runtime_path": rel_display(agent_dir / "runtime.json"),
         "policy": None,
         "error": None,
         "started_at": started_at,
@@ -568,18 +753,23 @@ async def run_fake_harness(
         )
         return 1, stdout, stderr, stdout_truncated or stderr_truncated
 
-    fake_patch = agent.get("fake_patch")
-    if agent["mode"] == "patch_only" and isinstance(fake_patch, dict):
-        raw_path = str(fake_patch.get("path", "subagent_fake_patch.txt"))
-        target, normalized_path = _safe_fake_patch_target(cwd, raw_path)
-        content = str(fake_patch.get("content", "fake patch\n"))
-        if fake_patch.get("append"):
-            append_bytes_no_follow(target, content.encode("utf-8"))
-        else:
-            atomic_write_bytes(target, content.encode("utf-8"))
-        response["files_changed"] = sorted(
-            set([*response.get("files_changed", []), normalized_path])
-        )
+    fake_patches: list[dict[str, Any]] = []
+    if isinstance(agent.get("fake_patch"), dict):
+        fake_patches.append(agent["fake_patch"])
+    if isinstance(agent.get("fake_patches"), list):
+        fake_patches.extend(item for item in agent["fake_patches"] if isinstance(item, dict))
+    if agent["mode"] == "patch_only":
+        for fake_patch in fake_patches:
+            raw_path = str(fake_patch.get("path", "subagent_fake_patch.txt"))
+            target, normalized_path = _safe_fake_patch_target(cwd, raw_path)
+            content = str(fake_patch.get("content", "fake patch\n"))
+            if fake_patch.get("append"):
+                append_bytes_no_follow(target, content.encode("utf-8"))
+            else:
+                atomic_write_bytes(target, content.encode("utf-8"))
+            response["files_changed"] = sorted(
+                set([*response.get("files_changed", []), normalized_path])
+            )
 
     stdout = (
         "Fake harness completed.\n"
@@ -612,9 +802,18 @@ async def run_agent(
 ) -> dict[str, Any]:
     agent = dict(agent)
     agent["run_id"] = run_id
-    repo_root = git_root(repo_cwd)
+    invocation_root = repo_cwd.resolve()
+    source_cwd = (invocation_root / agent["source_root"]).resolve()
+    try:
+        source_cwd.relative_to(invocation_root)
+    except ValueError as exc:
+        raise RunnerError(f"agent {agent['id']}: source_root escapes the invocation directory") from exc
+    if not source_cwd.is_dir():
+        raise RunnerError(f"agent {agent['id']}: source_root is not a directory: {source_cwd}")
+    agent["resolved_source_root"] = str(source_cwd)
+    repo_root = git_root(source_cwd)
     if repo_root is not None:
-        agent["repo_subdir"] = repo_cwd.resolve().relative_to(repo_root).as_posix() or "."
+        agent["repo_subdir"] = source_cwd.relative_to(repo_root).as_posix() or "."
         agent["source_repo_root"] = str(repo_root)
     else:
         agent["repo_subdir"] = "."
@@ -628,6 +827,7 @@ async def run_agent(
     stderr_path = agent_dir / "stderr.log"
     events_path = agent_dir / "events.jsonl"
     result_path = agent_dir / "result.json"
+    runtime_path = agent_dir / "runtime.json"
     task_path = agent_dir / "task.json"
     patch_path = agent_dir / "patch.diff"
 
@@ -638,6 +838,7 @@ async def run_agent(
     write_text(stderr_path, "")
 
     events = EventLogger(events_path, agent["id"])
+    runtime = RuntimeTracker(runtime_path, events, agent["harness"])
     started_at = now_iso()
     started_time = time.monotonic()
     result = initial_result(run_id, agent, agent_dir, started_at)
@@ -648,11 +849,15 @@ async def run_agent(
     before_snapshot: dict[str, tuple[str, int, int, str]] | None = None
     workspace = None
     try:
+        if cancellation_requested(run_dir):
+            raise UserCancelled("cancelled before workspace preparation")
         workspace = prepare_workspace(
-            repo_cwd,
+            source_cwd,
             agent_dir,
             agent["effective_deny_paths"],
             agent["mode"],
+            agent["max_workspace_files"],
+            agent["max_workspace_bytes"],
         )
         result["baseline_commit"] = workspace.baseline_commit
         if workspace.baseline_manifest_sha256:
@@ -662,6 +867,8 @@ async def run_agent(
             before_snapshot = snapshot_files(workspace.worktree or repo_cwd)
 
         env = build_env(agent, agent_dir, workspace.harness_cwd)
+        if cancellation_requested(run_dir):
+            raise UserCancelled("cancelled before harness launch")
         decode_error: str | None = None
         process_error_kind: str | None = None
         process_error: str | None = None
@@ -688,6 +895,12 @@ async def run_agent(
                 agent_dir,
                 config,
             )
+            def process_started(pid: int, pgid: int, start_token: str | None) -> None:
+                runtime.process_started(pid, pgid, start_token)
+                if cancellation_requested(run_dir) and os.name == "posix":
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(pgid, signal.SIGTERM)
+
             outcome = await run_external_harness(
                 invocation,
                 workspace.harness_cwd,
@@ -697,6 +910,10 @@ async def run_agent(
                 stdout_path,
                 stderr_path,
                 events.write,
+                idle_timeout_sec=agent["idle_timeout_sec"],
+                process_started_writer=process_started,
+                activity_writer=runtime.activity,
+                stdout_line_writer=runtime.stream_line,
             )
             returncode = outcome.returncode
             stdout_text = outcome.stdout
@@ -708,14 +925,24 @@ async def run_agent(
                 decoded = decode_harness_output(agent["harness"], stdout_text)
                 normalized_output = decoded.text
                 decode_error = decoded.error
+                result["harness_metadata"] = decoded.metadata
 
         merge_result_fields(result, parse_subagent_result(normalized_output))
-        if process_error_kind == "timeout":
+        if cancellation_requested(run_dir):
+            result["status"] = "cancelled"
+            result["error"] = "cancelled by broker request"
+        elif process_error_kind == "timeout":
             result["status"] = "timeout"
             result["error"] = process_error or "timeout"
         elif process_error_kind == "output_limit":
             result["status"] = "output_limit"
             result["error"] = process_error or "output limit exceeded"
+        elif process_error_kind == "idle_timeout":
+            result["status"] = "idle_timeout"
+            current_tool = runtime.state.get("current_tool")
+            tool_name = current_tool.get("name") if isinstance(current_tool, dict) else None
+            suffix = f"; current tool: {tool_name}" if tool_name else ""
+            result["error"] = (process_error or "idle timeout") + suffix
         elif process_error_kind:
             result["status"] = "failed"
             result["error"] = process_error or process_error_kind
@@ -751,7 +978,7 @@ async def run_agent(
                     result["status"] = "failed"
                     append_error(result, "read_only job modified files")
             elif before_snapshot is not None:
-                changed = changed_snapshot_paths(before_snapshot, snapshot_files(repo_cwd))
+                changed = changed_snapshot_paths(before_snapshot, snapshot_files(source_cwd))
                 if changed:
                     result["files_changed"] = changed
                     result["status"] = "failed"
@@ -762,15 +989,36 @@ async def run_agent(
             assert workspace.baseline_commit is not None
             restore_trusted_git_metadata(workspace)
             changed = git_changed_paths(workspace.worktree, workspace.baseline_commit)
-            path_policy = check_paths(changed, agent["allowed_paths"], agent["deny_paths"])
-            result["files_changed"] = path_policy["changed_files"]
-            if path_policy["status"] != "passed":
-                result["policy"] = path_policy
-                events.write("policy_check", status="failed", phase="paths")
-                if result["status"] == "completed":
+            result["files_changed"] = changed
+            if result["status"] != "completed" or not changed:
+                result["policy"] = None
+            elif len(changed) > agent["max_files_changed"]:
+                violation = (
+                    f"Changed file count {len(changed)} exceeds max_files_changed "
+                    f"{agent['max_files_changed']}"
+                )
+                result["policy"] = {
+                    "status": "failed",
+                    "changed_files": changed,
+                    "violations": [violation],
+                }
+                result["status"] = "policy_failed"
+                result["error"] = violation
+                events.write("policy_check", status="failed", phase="file_count")
+            else:
+                path_policy = check_paths(
+                    changed,
+                    agent["allowed_paths"],
+                    agent["effective_deny_paths"],
+                )
+                result["files_changed"] = path_policy["changed_files"]
+                if path_policy["status"] != "passed":
+                    result["policy"] = path_policy
+                    events.write("policy_check", status="failed", phase="paths")
                     result["status"] = "policy_failed"
                     result["error"] = "; ".join(path_policy["violations"])
-            else:
+
+            if result["status"] == "completed" and changed:
                 artifact = collect_git_diff(
                     workspace.worktree,
                     workspace.baseline_commit,
@@ -779,7 +1027,7 @@ async def run_agent(
                 staged_policy = check_paths(
                     artifact.changed_paths,
                     agent["allowed_paths"],
-                    agent["deny_paths"],
+                    agent["effective_deny_paths"],
                 )
                 current_paths = git_changed_paths(
                     workspace.worktree,
@@ -788,7 +1036,7 @@ async def run_agent(
                 current_policy = check_paths(
                     current_paths,
                     agent["allowed_paths"],
-                    agent["deny_paths"],
+                    agent["effective_deny_paths"],
                 )
                 if staged_policy["status"] != "passed" or current_policy["status"] != "passed":
                     policy = (
@@ -797,38 +1045,37 @@ async def run_agent(
                     result["policy"] = policy
                     result["files_changed"] = policy["changed_files"]
                     events.write("policy_check", status="failed", phase="staged_paths")
-                    if result["status"] == "completed":
-                        result["status"] = "policy_failed"
-                        result["error"] = "; ".join(policy["violations"])
-                    continue_patch = False
+                    result["status"] = "policy_failed"
+                    result["error"] = "; ".join(policy["violations"])
                 else:
-                    continue_patch = True
-
-                if not continue_patch:
-                    artifact = None
-                else:
-                    atomic_write_bytes(patch_path, artifact.data)
-                    result["patch_path"] = rel_display(patch_path)
-                    result["patch_sha256"] = hashlib.sha256(artifact.data).hexdigest()
-                    events.write("patch_created", path=rel_display(patch_path))
                     policy = check_policy(
                         artifact.data,
                         agent["allowed_paths"],
-                        agent["deny_paths"],
+                        agent["effective_deny_paths"],
                         allow_binary_changes=agent["allow_binary_changes"],
                         allow_deletes=agent["allow_deletes"],
                         changed_paths=artifact.changed_paths,
                         has_binary_changes=artifact.has_binary_changes,
                         has_deletes=artifact.has_deletes,
                     )
-                result["policy"] = policy
-                result["files_changed"] = policy["changed_files"]
-                if continue_patch:
-                    events.write("policy_check", status=policy["status"], phase="patch")
-                if result["status"] == "completed" and policy["status"] != "passed":
-                    result["status"] = "policy_failed"
-                    result["error"] = "; ".join(policy["violations"]) or "patch policy failed"
+                    result["policy"] = policy
+                    result["files_changed"] = policy["changed_files"]
+                    if policy["status"] != "passed":
+                        events.write("policy_check", status="failed", phase="patch")
+                        result["status"] = "policy_failed"
+                        result["error"] = (
+                            "; ".join(policy["violations"]) or "patch policy failed"
+                        )
+                    else:
+                        atomic_write_bytes(patch_path, artifact.data)
+                        result["patch_path"] = rel_display(patch_path)
+                        result["patch_sha256"] = hashlib.sha256(artifact.data).hexdigest()
+                        events.write("patch_created", path=rel_display(patch_path))
+                        events.write("policy_check", status="passed", phase="patch")
 
+    except UserCancelled as exc:
+        result["status"] = "cancelled"
+        result["error"] = str(exc)
     except asyncio.CancelledError as exc:
         result["status"] = "cancelled"
         result["error"] = "cancelled"
@@ -849,17 +1096,21 @@ async def run_agent(
         else:
             events.write("failed", error=result.get("error") or result["status"])
         write_json(result_path, result)
+        runtime.finish(result["status"])
     if cancelled is not None:
         raise cancelled
     return result
 
 
 def aggregate_status(results: list[dict[str, Any]]) -> str:
-    if all(result.get("status") == "completed" for result in results):
+    statuses = [result.get("status") for result in results]
+    if statuses and all(status == "completed" for status in statuses):
         return "completed"
-    if any(result.get("status") == "running" for result in results):
+    if any(status in {"queued", "running"} for status in statuses):
         return "running"
-    if any(result.get("status") == "cancelled" for result in results):
+    if any(status == "completed" for status in statuses):
+        return "partial_success"
+    if statuses and all(status == "cancelled" for status in statuses):
         return "cancelled"
     return "failed"
 
@@ -869,10 +1120,17 @@ def write_run_result(
     run_id: str,
     results: list[dict[str, Any]],
     started_at: str,
+    failure_policy: str = "collect_all",
+    success_policy: str = "require_all",
 ) -> dict[str, Any]:
+    status = aggregate_status(results)
     payload = {
         "run_id": run_id,
-        "status": aggregate_status(results),
+        "status": status,
+        "failure_policy": failure_policy,
+        "success_policy": success_policy,
+        "success_policy_satisfied": status == "completed"
+        or (status == "partial_success" and success_policy == "require_any"),
         "started_at": started_at,
         "ended_at": now_iso(),
         "agents": results,
@@ -880,6 +1138,56 @@ def write_run_result(
     write_json(run_dir / "result.json", payload)
     write_summary(run_dir, payload)
     return payload
+
+
+def queued_result(run_id: str, agent: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "agent_id": agent["id"],
+        "status": "queued",
+        "mode": agent["mode"],
+        "harness": agent["harness"],
+        "model": agent.get("model"),
+        "approval_policy": agent["approval_policy"],
+        "files_changed": [],
+    }
+
+
+def write_running_run_result(run_dir: Path, packet: dict[str, Any], started_at: str) -> None:
+    write_json(
+        run_dir / "result.json",
+        {
+            "run_id": packet["run_id"],
+            "status": "running",
+            "failure_policy": packet["failure_policy"],
+            "success_policy": packet["success_policy"],
+            "success_policy_satisfied": False,
+            "started_at": started_at,
+            "ended_at": None,
+            "agents": [queued_result(packet["run_id"], agent) for agent in packet["agents"]],
+        },
+    )
+
+
+def write_cancelled_placeholder(
+    run_dir: Path,
+    run_id: str,
+    agent: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    agent_dir = safe_child(run_dir, agent["id"], "agent id")
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    started_at = now_iso()
+    result = initial_result(run_id, agent, agent_dir, started_at)
+    result.update(
+        {
+            "status": "cancelled",
+            "error": reason,
+            "ended_at": started_at,
+        }
+    )
+    write_json(agent_dir / "result.json", result)
+    return result
 
 
 def format_list(items: list[Any]) -> str:
@@ -895,6 +1203,8 @@ def write_summary(run_dir: Path, aggregate: dict[str, Any]) -> None:
         f"Status: {aggregate['status']}",
         f"Started: {aggregate.get('started_at')}",
         f"Ended: {aggregate.get('ended_at')}",
+        f"Failure policy: {aggregate.get('failure_policy', 'collect_all')}",
+        f"Success policy: {aggregate.get('success_policy', 'require_all')}",
         "",
         "## Agents",
         "",
@@ -964,25 +1274,84 @@ async def run_packet(args: argparse.Namespace) -> int:
     max_concurrency = max(1, max_concurrency)
     semaphore = asyncio.Semaphore(max_concurrency)
     started_at = now_iso()
+    write_running_run_result(run_dir, packet, started_at)
 
     async def limited(agent: dict[str, Any]) -> dict[str, Any]:
         async with semaphore:
-            return await run_agent(run_id, agent, run_dir, Path.cwd(), config)
+            result = await run_agent(run_id, agent, run_dir, Path.cwd(), config)
+            if packet["failure_policy"] == "fail_fast" and result.get("status") != "completed":
+                write_json(
+                    cancel_marker(run_dir),
+                    {"requested_at": now_iso(), "reason": "failure_policy fail_fast"},
+                )
+            return result
 
-    tasks = [asyncio.create_task(limited(agent)) for agent in packet["agents"]]
+    task_agents = {
+        asyncio.create_task(limited(agent)): agent for agent in packet["agents"]
+    }
+    tasks = list(task_agents)
     try:
-        results = await asyncio.gather(*tasks)
+        if packet["failure_policy"] == "collect_all":
+            results = await asyncio.gather(*tasks)
+        else:
+            pending = set(tasks)
+            results = []
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                failed = False
+                for task in done:
+                    try:
+                        result = task.result()
+                    except asyncio.CancelledError:
+                        continue
+                    results.append(result)
+                    failed = failed or result.get("status") != "completed"
+                if failed and pending:
+                    write_json(
+                        cancel_marker(run_dir),
+                        {"requested_at": now_iso(), "reason": "failure_policy fail_fast"},
+                    )
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    break
     except asyncio.CancelledError:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         partial_results = load_agent_results(run_dir)
         if partial_results:
-            write_run_result(run_dir, run_id, partial_results, started_at)
+            write_run_result(
+                run_dir,
+                run_id,
+                partial_results,
+                started_at,
+                packet["failure_policy"],
+                packet["success_policy"],
+            )
         raise
-    aggregate = write_run_result(run_dir, run_id, results, started_at)
+    loaded_results = {result["agent_id"]: result for result in load_agent_results(run_dir)}
+    for agent in packet["agents"]:
+        if agent["id"] not in loaded_results:
+            loaded_results[agent["id"]] = write_cancelled_placeholder(
+                run_dir,
+                run_id,
+                agent,
+                "cancelled before agent launch",
+            )
+    results = [loaded_results[agent["id"]] for agent in packet["agents"]]
+    aggregate = write_run_result(
+        run_dir,
+        run_id,
+        results,
+        started_at,
+        packet["failure_policy"],
+        packet["success_policy"],
+    )
     print(rel_display(run_dir / "summary.md"))
-    return 0 if aggregate["status"] == "completed" else 1
+    return 0 if aggregate["success_policy_satisfied"] else 1
 
 
 def load_agent_results(run_dir: Path) -> list[dict[str, Any]]:
@@ -993,6 +1362,52 @@ def load_agent_results(run_dir: Path) -> list[dict[str, Any]]:
         if isinstance(loaded, dict):
             results.append(loaded)
     return results
+
+
+def load_json_object(path: Path) -> dict[str, Any] | None:
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def current_changed_count(agent_dir: Path) -> int | None:
+    manifest = load_json_object(agent_dir / "baseline_manifest.json")
+    worktree = agent_dir / "worktree"
+    if not manifest or not worktree.is_dir():
+        return None
+    baseline = manifest.get("files")
+    if not isinstance(baseline, dict):
+        return None
+    current = {
+        path: {"mode": f"{entry[1]:o}", "sha256": entry[3]}
+        for path, entry in snapshot_files(worktree).items()
+    }
+    return sum(
+        1
+        for path in set(baseline) | set(current)
+        if baseline.get(path) != current.get(path)
+    )
+
+
+def elapsed_seconds(result: dict[str, Any]) -> float | None:
+    if isinstance(result.get("duration_sec"), (int, float)) and result.get("status") not in {
+        "queued",
+        "running",
+    }:
+        return float(result["duration_sec"])
+    started_at = result.get("started_at")
+    if not isinstance(started_at, str):
+        return None
+    try:
+        started = datetime.fromisoformat(started_at)
+    except ValueError:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -1007,8 +1422,18 @@ def command_status(args: argparse.Namespace) -> int:
             aggregate = loaded
             run_id = str(aggregate.get("run_id") or run_id)
 
-    results = load_agent_results(run_dir)
-    status = aggregate.get("status") if aggregate else aggregate_status(results) if results else "unknown"
+    live_results = {result["agent_id"]: result for result in load_agent_results(run_dir)}
+    aggregate_results = aggregate.get("agents", []) if aggregate else []
+    ordered_ids = [str(result.get("agent_id")) for result in aggregate_results]
+    ordered_ids.extend(agent_id for agent_id in live_results if agent_id not in ordered_ids)
+    results = []
+    for agent_id in ordered_ids:
+        fallback = next(
+            (item for item in aggregate_results if item.get("agent_id") == agent_id),
+            {"agent_id": agent_id, "status": "queued"},
+        )
+        results.append(live_results.get(agent_id, fallback))
+    status = aggregate_status(results) if results else "unknown"
     print(f"Run: {run_id}")
     print(f"Status: {status}")
     print()
@@ -1016,7 +1441,26 @@ def command_status(args: argparse.Namespace) -> int:
     if not results:
         print("- none")
     for result in results:
-        print(f"- {result.get('agent_id')}: {result.get('status')}")
+        agent_dir = run_dir / str(result.get("agent_id"))
+        runtime = load_json_object(agent_dir / "runtime.json")
+        details = [str(result.get("status"))]
+        elapsed = elapsed_seconds(result)
+        if elapsed is not None:
+            details.append(f"duration={elapsed:.1f}s")
+        if runtime:
+            if runtime.get("status") == "running" and runtime.get("pid"):
+                details.append(f"pid={runtime['pid']}")
+            if runtime.get("status") == "running" and runtime.get("pgid"):
+                details.append(f"pgid={runtime['pgid']}")
+            if runtime.get("last_activity_at"):
+                details.append(f"last_activity={runtime['last_activity_at']}")
+            tool = runtime.get("current_tool")
+            if isinstance(tool, dict) and tool.get("name"):
+                details.append(f"tool={tool['name']}")
+        live_changed = current_changed_count(agent_dir)
+        changed_count = live_changed if live_changed is not None else len(result.get("files_changed") or [])
+        details.append(f"files_changed={changed_count}")
+        print(f"- {result.get('agent_id')}: {', '.join(details)}")
     return 0
 
 
@@ -1031,17 +1475,67 @@ def command_collect(args: argparse.Namespace) -> int:
         return 2
     started_values = [str(result.get("started_at")) for result in results if result.get("started_at")]
     started_at = min(started_values) if started_values else now_iso()
-    aggregate = write_run_result(run_dir, run_dir.name, results, started_at)
+    previous = load_json_object(run_dir / "result.json") or {}
+    aggregate = write_run_result(
+        run_dir,
+        run_dir.name,
+        results,
+        started_at,
+        str(previous.get("failure_policy") or "collect_all"),
+        str(previous.get("success_policy") or "require_all"),
+    )
     print(rel_display(run_dir / "summary.md"))
-    return 0 if aggregate["status"] == "completed" else 1
+    return 0 if aggregate["success_policy_satisfied"] else 1
 
 
 def command_cancel(args: argparse.Namespace) -> int:
-    print(
-        "Background process management is not implemented in the MVP; no recorded process IDs were cancelled.",
-        file=sys.stderr,
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        print(f"Run directory not found: {run_dir}", file=sys.stderr)
+        return 2
+    if args.grace_sec < 0:
+        print("--grace-sec must be non-negative", file=sys.stderr)
+        return 2
+    write_json(
+        cancel_marker(run_dir),
+        {"requested_at": now_iso(), "reason": "user request"},
     )
-    return 2
+    groups: set[int] = set()
+    signalled = 0
+    refused = 0
+    for runtime_path in sorted(run_dir.glob("*/runtime.json")):
+        runtime = load_json_object(runtime_path)
+        if not runtime or runtime.get("status") != "running":
+            continue
+        pid = runtime.get("pid")
+        pgid = runtime.get("pgid")
+        token = runtime.get("process_start_token")
+        if type(pid) is not int or type(pgid) is not int:
+            continue
+        if os.name != "posix" or not token or process_start_token(pid) != token:
+            refused += 1
+            print(f"Refused stale or unverifiable process identity: pid={pid}", file=sys.stderr)
+            continue
+        try:
+            if os.getpgid(pid) != pgid:
+                refused += 1
+                continue
+            os.killpg(pgid, signal.SIGTERM)
+            groups.add(pgid)
+            signalled += 1
+        except (ProcessLookupError, PermissionError):
+            refused += 1
+
+    deadline = time.monotonic() + args.grace_sec
+    while groups and time.monotonic() < deadline:
+        groups = {pgid for pgid in groups if process_group_exists(pgid)}
+        if groups:
+            time.sleep(0.05)
+    for pgid in groups:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGKILL)
+    print(f"Cancellation requested: signalled={signalled}, refused={refused}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1061,6 +1555,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cancel_parser = subparsers.add_parser("cancel", help="cancel a run")
     cancel_parser.add_argument("run_dir")
+    cancel_parser.add_argument("--grace-sec", type=float, default=2.0)
     return parser
 
 

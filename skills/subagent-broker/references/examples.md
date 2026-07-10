@@ -95,6 +95,8 @@ python .agents/skills/subagent-broker/scripts/subagent_runner.py run tasks.json 
 }
 ```
 
+Claude defaults to `bounded`; this read-only task needs no Bash permission. For a patch task that runs tests, set `mode` to `patch_only` and add only the required command family, for example `"allowed_tools": ["Bash(python -m pytest *)"]`. Exact flag sequences are brittle because Claude may choose equivalent flags or ordering.
+
 ## Grok Build Read-only Review
 
 ```json

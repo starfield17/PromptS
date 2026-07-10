@@ -6,7 +6,7 @@ The broker isolates context, working copies, process output, and patch artifacts
 
 For a Git repository, each agent receives a standalone one-commit repository under `.subagents/<run_id>/<agent_id>/worktree`:
 
-- Build a temporary index from `HEAD` plus the current staged, unstaged, deleted, and non-ignored untracked state.
+- Build a temporary index from `HEAD`, or an empty index for an unborn repository, plus the current staged, unstaged, deleted, and non-ignored untracked state.
 - Exclude effective deny paths before export.
 - Write dirty blobs to an agent-local temporary object directory, never the source repository object database.
 - Export exact visible bytes, symlink targets, and executable modes into a fresh repository.
@@ -16,7 +16,7 @@ For a Git repository, each agent receives a standalone one-commit repository und
 
 This makes the agent patch relative to the user's visible starting state without stashing, committing, or changing the source index. Ignored untracked files, empty directories, and dirty submodule contents are not mirrored.
 
-For non-Git `read_only` tasks, copy the source tree into an isolated workspace while excluding deny paths. `patch_only` still requires Git.
+For non-Git `read_only` tasks, preflight file count and byte size, then copy the selected `source_root` into an isolated workspace while excluding deny paths. `patch_only` still requires Git unless `source_root` selects a nested Git repository.
 
 Output root, run, and agent paths reject dot-segment IDs and pre-existing symlinks before cleanup. Artifact writers use atomic replacement or no-follow append operations so leaf symlinks cannot redirect broker output.
 
@@ -65,7 +65,7 @@ With `home_policy: host`, preserve host HOME and vendor overrides so a harness c
 
 ## Process Lifecycle
 
-Capture stdout/stderr incrementally with a hard per-stream limit. Timeout, output overflow, cancellation, or pipe-drain failure terminates the saved process group with TERM then KILL. A completed leader's remaining same-group descendants are also terminated.
+Append stdout/stderr incrementally with a hard per-stream limit. Persist PID/PGID and activity state outside the worktree. Total timeout, idle timeout, output overflow, cancellation, or pipe-drain failure terminates the saved process group with TERM then KILL. A completed leader's remaining same-group descendants are also terminated.
 
 Processes that deliberately create a new session or double-fork can escape process-group cleanup. Strong lifecycle containment requires cgroups, containers, or platform Job Objects.
 
