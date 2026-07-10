@@ -13,7 +13,20 @@ from typing import Iterable
 
 
 DIFF_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
-DEFAULT_DENY = [".env*", ".git/**", ".subagents/**", "secrets/**"]
+DEFAULT_DENY = [
+    ".env*",
+    "**/.env*",
+    ".git",
+    ".git/**",
+    "**/.git",
+    "**/.git/**",
+    ".subagents",
+    ".subagents/**",
+    "**/.subagents",
+    "**/.subagents/**",
+    "secrets/**",
+    "**/secrets/**",
+]
 
 
 class PolicyParseError(ValueError):
@@ -21,12 +34,12 @@ class PolicyParseError(ValueError):
 
 
 def normalize_path(path: str) -> str:
-    path = path.strip().replace("\\", "/")
-    if path.startswith("a/") or path.startswith("b/"):
-        path = path[2:]
-    if not path or path == "/dev/null":
+    if not isinstance(path, str) or not path or "\0" in path:
         raise PolicyParseError("Invalid empty or null path")
-    if path.startswith("/") or re.match(r"^[A-Za-z]:", path):
+    if path != path.strip():
+        # Leading and trailing spaces are valid Git path bytes and must remain exact.
+        path = path
+    if path.startswith("/") or re.match(r"^[A-Za-z]:[/\\]", path):
         raise PolicyParseError(f"Absolute path is not allowed: {path}")
     parts = PurePosixPath(path).parts
     if any(part in ("", ".", "..") for part in parts):
@@ -34,17 +47,39 @@ def normalize_path(path: str) -> str:
     return "/".join(parts)
 
 
+def normalize_diff_path(path: str) -> str:
+    path = path.strip()
+    if path.startswith("a/") or path.startswith("b/"):
+        path = path[2:]
+    if path == "/dev/null":
+        raise PolicyParseError("Invalid empty or null path")
+    return normalize_path(path)
+
+
 def normalize_pattern(pattern: str) -> str:
-    return pattern.strip().replace("\\", "/")
+    return pattern.strip()
 
 
 def match_path(path: str, pattern: str) -> bool:
     pattern = normalize_pattern(pattern)
-    if pattern == "**":
-        return True
-    if pattern.endswith("/**") and path == pattern[:-3]:
-        return True
-    return fnmatch.fnmatchcase(path, pattern)
+    path_parts = path.split("/")
+    pattern_parts = pattern.split("/")
+
+    def matches(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+        part = pattern_parts[pattern_index]
+        if part == "**":
+            return matches(path_index, pattern_index + 1) or (
+                path_index < len(path_parts) and matches(path_index + 1, pattern_index)
+            )
+        return (
+            path_index < len(path_parts)
+            and fnmatch.fnmatchcase(path_parts[path_index], part)
+            and matches(path_index + 1, pattern_index + 1)
+        )
+
+    return matches(0, 0)
 
 
 def parse_diff_paths(diff_text: str) -> tuple[list[str], bool, bool, list[str]]:
@@ -66,7 +101,7 @@ def parse_diff_paths(diff_text: str) -> tuple[list[str], bool, bool, list[str]]:
             current_paths = set()
             for raw_path in match.groups():
                 try:
-                    path = normalize_path(raw_path)
+                    path = normalize_diff_path(raw_path)
                 except PolicyParseError as exc:
                     violations.append(str(exc))
                     continue
@@ -97,7 +132,7 @@ def parse_diff_paths(diff_text: str) -> tuple[list[str], bool, bool, list[str]]:
                     deleted = True
                 continue
             try:
-                path = normalize_path(marker_path)
+                path = normalize_diff_path(marker_path)
             except PolicyParseError as exc:
                 violations.append(str(exc))
                 continue
@@ -110,26 +145,58 @@ def parse_diff_paths(diff_text: str) -> tuple[list[str], bool, bool, list[str]]:
     return sorted(changed), binary, deleted, violations
 
 
+def check_paths(
+    paths: Iterable[str],
+    allowed_paths: Iterable[str],
+    deny_paths: Iterable[str],
+) -> dict[str, object]:
+    changed: set[str] = set()
+    violations: list[str] = []
+    for raw_path in paths:
+        try:
+            changed.add(normalize_path(raw_path))
+        except PolicyParseError as exc:
+            violations.append(str(exc))
+
+    allowed = [normalize_pattern(pattern) for pattern in allowed_paths]
+    denied = [normalize_pattern(pattern) for pattern in [*DEFAULT_DENY, *deny_paths]]
+    changed_files = sorted(changed)
+    if not allowed and changed_files:
+        violations.append("No allowed paths were provided")
+    for path in changed_files:
+        if any(match_path(path, pattern) for pattern in denied):
+            violations.append(f"Denied path modified: {path}")
+        elif not any(match_path(path, pattern) for pattern in allowed):
+            violations.append(f"Path outside allowed paths: {path}")
+
+    deduped = list(dict.fromkeys(violations))
+    return {
+        "status": "failed" if deduped else "passed",
+        "changed_files": changed_files,
+        "violations": deduped,
+    }
+
+
 def check_policy(
-    diff_text: str,
+    diff_text: str | bytes,
     allowed_paths: Iterable[str],
     deny_paths: Iterable[str],
     allow_binary_changes: bool = False,
     allow_deletes: bool = False,
+    changed_paths: Iterable[str] | None = None,
+    has_binary_changes: bool | None = None,
+    has_deletes: bool | None = None,
 ) -> dict[str, object]:
-    changed_files, has_binary, has_deletes, violations = parse_diff_paths(diff_text)
-    allowed = [normalize_pattern(p) for p in allowed_paths]
-    denied = [normalize_pattern(p) for p in [*DEFAULT_DENY, *deny_paths]]
-
-    if not allowed and changed_files:
-        violations.append("No allowed paths were provided")
-
-    for path in changed_files:
-        if any(match_path(path, pattern) for pattern in denied):
-            violations.append(f"Denied path modified: {path}")
-            continue
-        if not any(match_path(path, pattern) for pattern in allowed):
-            violations.append(f"Path outside allowed paths: {path}")
+    decoded = diff_text.decode("latin-1") if isinstance(diff_text, bytes) else diff_text
+    if changed_paths is None:
+        changed_files, has_binary, has_deletes, violations = parse_diff_paths(decoded)
+    else:
+        changed_files = list(changed_paths)
+        has_binary = bool(has_binary_changes)
+        has_deletes = bool(has_deletes)
+        violations = []
+    path_result = check_paths(changed_files, allowed_paths, deny_paths)
+    violations.extend(path_result["violations"])
 
     if has_binary and not allow_binary_changes:
         violations.append("Binary file changes are not allowed")
@@ -163,7 +230,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        with open(args.patch, "r", encoding="utf-8", errors="replace") as handle:
+        with open(args.patch, "rb") as handle:
             diff_text = handle.read()
         result = check_policy(
             diff_text,

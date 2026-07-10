@@ -86,7 +86,6 @@ python .agents/skills/subagent-broker/scripts/subagent_runner.py run tasks.json 
     {
       "id": "review",
       "home_policy": "host",
-      "dangerously_skip_permissions": true,
       "goal": "Review the test suite organization and recommend focused improvements.",
       "allowed_paths": ["tests/**"],
       "deny_paths": [".env*", ".git/**", "secrets/**"],
@@ -96,6 +95,56 @@ python .agents/skills/subagent-broker/scripts/subagent_runner.py run tasks.json 
 }
 ```
 
+## Grok Build Read-only Review
+
+```json
+{
+  "run_id": "grok-review",
+  "defaults": {
+    "timeout_sec": 900,
+    "mode": "read_only",
+    "harness": "grok-build"
+  },
+  "agents": [
+    {
+      "id": "review",
+      "home_policy": "host",
+      "goal": "Review the API implementation for correctness risks without changing files.",
+      "allowed_paths": ["src/api/**", "tests/api/**"],
+      "return": ["summary", "risks", "recommendations"]
+    }
+  ]
+}
+```
+
+`home_policy: "host"` reuses the local Grok login and configuration. Omit it when using environment-based authentication and an isolated Grok home.
+
+## Grok Build Patch Task
+
+```json
+{
+  "run_id": "grok-tests",
+  "defaults": {
+    "timeout_sec": 900,
+    "mode": "patch_only",
+    "harness": "grok-build",
+    "approval_policy": "unattended"
+  },
+  "agents": [
+    {
+      "id": "add-tests",
+      "home_policy": "host",
+      "goal": "Add focused regression tests for the reported parser bug.",
+      "allowed_paths": ["tests/parser/**"],
+      "deny_paths": ["tests/fixtures/private/**"],
+      "return": ["summary", "patch", "tests_run", "risks"]
+    }
+  ]
+}
+```
+
+`unattended` maps to Grok `--always-approve`; this patch task uses it so tool approvals cannot stall the headless run. Prefer `default` whenever the task can complete without broad vendor approval. The broker still verifies paths, patch bytes, and the source baseline before application.
+
 ## Checking and Applying a Patch
 
 ```bash
@@ -103,4 +152,4 @@ python .agents/skills/subagent-broker/scripts/merge_patches.py --check .subagent
 python .agents/skills/subagent-broker/scripts/merge_patches.py --apply .subagents/<run_id>/<agent_id>/patch.diff
 ```
 
-The apply command requires a passed policy result in the agent's `result.json` and does not auto-commit.
+Run these commands from the original source repository. The apply command requires a completed result, passed policy, matching artifact hashes, the recorded source root, and an unchanged source baseline. It does not stage or commit.

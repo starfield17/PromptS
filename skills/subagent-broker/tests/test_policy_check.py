@@ -8,6 +8,9 @@ from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 POLICY = SKILL_DIR / "scripts" / "policy_check.py"
+sys.path.insert(0, str(SKILL_DIR / "scripts"))
+
+from policy_check import check_paths, check_policy  # noqa: E402
 
 
 class PolicyCheckTests(unittest.TestCase):
@@ -118,6 +121,38 @@ rename to secrets/new.py
         )
         self.assertNotEqual(code, 0)
         self.assertIn("Denied path modified: secrets/new.py", result["violations"])
+
+    def test_structured_paths_do_not_strip_diff_prefixes(self):
+        result = check_paths(["a/private/key.txt"], ["**"], ["a/private/**"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["changed_files"], ["a/private/key.txt"])
+        self.assertIn("Denied path modified: a/private/key.txt", result["violations"])
+
+    def test_single_star_does_not_cross_path_segments(self):
+        direct = check_paths(["src/file.py"], ["src/*"], [])
+        nested = check_paths(["src/pkg/file.py"], ["src/*"], [])
+        recursive = check_paths(["src/pkg/file.py"], ["src/**"], [])
+        self.assertEqual(direct["status"], "passed")
+        self.assertEqual(nested["status"], "failed")
+        self.assertEqual(recursive["status"], "passed")
+
+    def test_structured_metadata_prevents_keyword_false_positives(self):
+        patch = b"""diff --git a/src/text.py b/src/text.py
+--- a/src/text.py
++++ b/src/text.py
+@@ -0,0 +1,2 @@
++GIT binary patch
++deleted file mode 100644
+"""
+        result = check_policy(
+            patch,
+            ["src/**"],
+            [],
+            changed_paths=["src/text.py"],
+            has_binary_changes=False,
+            has_deletes=False,
+        )
+        self.assertEqual(result["status"], "passed")
 
 
 if __name__ == "__main__":

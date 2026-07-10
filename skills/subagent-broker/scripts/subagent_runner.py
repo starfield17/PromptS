@@ -10,8 +10,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -21,13 +19,44 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
-POLICY_SCRIPT = SCRIPT_DIR / "policy_check.py"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from harness_adapters import (  # noqa: E402
+    HarnessAdapterError,
+    build_harness_invocation,
+    decode_harness_output,
+    supported_harnesses,
+)
+from policy_check import (  # noqa: E402
+    DEFAULT_DENY,
+    PolicyParseError,
+    check_paths,
+    check_policy,
+    normalize_path,
+)
+from runner_runtime import (  # noqa: E402
+    RunnerRuntimeError,
+    append_bytes_no_follow,
+    atomic_write_bytes,
+    changed_snapshot_paths,
+    cleanup_agent_dir,
+    collect_git_diff,
+    git_changed_paths,
+    git_root,
+    prepare_workspace,
+    restore_trusted_git_metadata,
+    run_external_harness,
+    snapshot_files,
+    verify_workspace_identity,
+)
+
+
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SUPPORTED_MODES = {"read_only", "patch_only"}
 UNSUPPORTED_MODES = {"direct_write", "shared_workspace", "network_sandbox", "daemon"}
-SUPPORTED_HARNESSES = {"fake", "opencode", "claude-code", "codex-cli"}
 SUPPORTED_HOME_POLICIES = {"isolated", "host"}
-DEFAULT_DENY_PATHS = [".env*", ".git/**", ".subagents/**", "secrets/**"]
+SUPPORTED_APPROVAL_POLICIES = {"default", "unattended"}
 SECRET_ENV_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|SESSION)", re.I)
 JSON_START = "SUBAGENT_RESULT_JSON_START"
 JSON_END = "SUBAGENT_RESULT_JSON_END"
@@ -48,8 +77,19 @@ def rel_display(path: Path) -> str:
 
 
 def ensure_safe_id(value: str, field: str) -> None:
-    if not value or not SAFE_ID_RE.fullmatch(value):
+    if not value or value in {".", ".."} or not SAFE_ID_RE.fullmatch(value):
         raise RunnerError(f"{field} must contain only letters, digits, underscore, dot, or hyphen: {value!r}")
+
+
+def safe_child(base: Path, identifier: str, field: str) -> Path:
+    if base.is_symlink():
+        raise RunnerError(f"{field} output base must not be a symlink: {base}")
+    candidate = base / identifier
+    if candidate.is_symlink():
+        raise RunnerError(f"{field} output path must not be a symlink: {candidate}")
+    if candidate.resolve().parent != base.resolve():
+        raise RunnerError(f"{field} escapes its output directory: {identifier!r}")
+    return candidate
 
 
 def read_text(path: Path) -> str:
@@ -57,36 +97,53 @@ def read_text(path: Path) -> str:
 
 
 def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    try:
+        data = text.encode("utf-8", errors="backslashreplace")
+        atomic_write_bytes(path, data)
+    except RunnerRuntimeError as exc:
+        raise RunnerError(str(exc)) from exc
 
 
 def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def load_task_packet(path: Path) -> dict[str, Any]:
     suffix = path.suffix.lower()
-    if suffix in {".yaml", ".yml"}:
-        try:
-            import yaml  # type: ignore
-        except ImportError as exc:
-            raise RunnerError("YAML task packets require PyYAML. Use JSON or install PyYAML.") from exc
-        with path.open("r", encoding="utf-8") as handle:
-            loaded = yaml.safe_load(handle)
-    else:
-        with path.open("r", encoding="utf-8") as handle:
-            loaded = json.load(handle)
+    try:
+        if suffix in {".yaml", ".yml"}:
+            try:
+                import yaml  # type: ignore
+            except ImportError as exc:
+                raise RunnerError("YAML task packets require PyYAML. Use JSON or install PyYAML.") from exc
+            with path.open("r", encoding="utf-8") as handle:
+                loaded = yaml.safe_load(handle)
+        else:
+            with path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+    except RunnerError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise RunnerError(f"Could not load task packet {path}: {exc}") from exc
     if not isinstance(loaded, dict):
         raise RunnerError("Task packet must be a JSON object")
     return loaded
 
 
-def normalize_bool(value: Any, default: bool = False) -> bool:
+def normalize_bool(value: Any, field: str, default: bool = False) -> bool:
     if value is None:
         return default
-    return bool(value)
+    if not isinstance(value, bool):
+        raise RunnerError(f"{field} must be a boolean")
+    return value
+
+
+def normalize_positive_int(value: Any, field: str, default: int) -> int:
+    if value is None:
+        return default
+    if type(value) is not int or value <= 0:
+        raise RunnerError(f"{field} must be a positive integer")
+    return value
 
 
 def normalize_list(value: Any, field: str) -> list[str]:
@@ -113,6 +170,7 @@ def validate_and_normalize(packet: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_agents, list) or not raw_agents:
         raise RunnerError("agents must be a non-empty list")
 
+    harness_names = supported_harnesses()
     agents: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for raw in raw_agents:
@@ -132,27 +190,32 @@ def validate_and_normalize(packet: dict[str, Any]) -> dict[str, Any]:
             raise RunnerError(f"agent {agent_id}: goal is required")
 
         mode = agent.get("mode", "read_only")
-        if mode in UNSUPPORTED_MODES:
+        if isinstance(mode, str) and mode in UNSUPPORTED_MODES:
             raise RunnerError(f"agent {agent_id}: unsupported mode for MVP: {mode}")
-        if mode not in SUPPORTED_MODES:
+        if not isinstance(mode, str) or mode not in SUPPORTED_MODES:
             raise RunnerError(f"agent {agent_id}: mode must be one of {sorted(SUPPORTED_MODES)}")
 
         harness = agent.get("harness", "fake")
-        if harness not in SUPPORTED_HARNESSES:
-            raise RunnerError(f"agent {agent_id}: harness must be one of {sorted(SUPPORTED_HARNESSES)}")
+        if not isinstance(harness, str) or harness not in harness_names:
+            raise RunnerError(f"agent {agent_id}: harness must be one of {sorted(harness_names)}")
 
-        timeout_sec = int(agent.get("timeout_sec", 1800))
-        if timeout_sec <= 0:
-            raise RunnerError(f"agent {agent_id}: timeout_sec must be positive")
+        for field in ("model", "agent"):
+            value = agent.get(field)
+            if value is not None and not isinstance(value, str):
+                raise RunnerError(f"agent {agent_id}: {field} must be a string")
 
-        max_output_bytes = int(agent.get("max_output_bytes", 2_000_000))
-        if max_output_bytes <= 0:
-            raise RunnerError(f"agent {agent_id}: max_output_bytes must be positive")
-
+        timeout_sec = normalize_positive_int(
+            agent.get("timeout_sec"), f"agent {agent_id}: timeout_sec", 1800
+        )
+        max_output_bytes = normalize_positive_int(
+            agent.get("max_output_bytes"), f"agent {agent_id}: max_output_bytes", 2_000_000
+        )
         allowed_paths = normalize_list(agent.get("allowed_paths", []), "allowed_paths")
         deny_paths = normalize_list(agent.get("deny_paths", []), "deny_paths")
         return_fields = normalize_list(agent.get("return", []), "return")
-        inherit_env = normalize_bool(agent.get("inherit_env"), True)
+        inherit_env = normalize_bool(
+            agent.get("inherit_env"), f"agent {agent_id}: inherit_env", True
+        )
 
         home_policy = agent.get("home_policy", "isolated")
         if not isinstance(home_policy, str) or home_policy not in SUPPORTED_HOME_POLICIES:
@@ -162,6 +225,47 @@ def validate_and_normalize(packet: dict[str, Any]) -> dict[str, Any]:
         if home_policy == "host" and not inherit_env:
             raise RunnerError(f"agent {agent_id}: home_policy 'host' requires inherit_env true")
 
+        approval_explicit = "approval_policy" in agent
+        approval_policy = agent.get("approval_policy", "default")
+        if not isinstance(approval_policy, str) or approval_policy not in SUPPORTED_APPROVAL_POLICIES:
+            raise RunnerError(
+                f"agent {agent_id}: approval_policy must be one of "
+                f"{sorted(SUPPORTED_APPROVAL_POLICIES)}"
+            )
+
+        legacy_skip = normalize_bool(
+            agent.get("dangerously_skip_permissions"),
+            f"agent {agent_id}: dangerously_skip_permissions",
+            False,
+        )
+        if "dangerously_skip_permissions" in agent and harness != "claude-code":
+            raise RunnerError(
+                f"agent {agent_id}: dangerously_skip_permissions is only valid for claude-code"
+            )
+        if legacy_skip:
+            if approval_explicit and approval_policy != "unattended":
+                raise RunnerError(
+                    f"agent {agent_id}: dangerously_skip_permissions conflicts with approval_policy"
+                )
+            approval_policy = "unattended"
+
+        codex_bypass = normalize_bool(
+            agent.get("dangerously_bypass_approvals_and_sandbox"),
+            f"agent {agent_id}: dangerously_bypass_approvals_and_sandbox",
+            False,
+        )
+        if "dangerously_bypass_approvals_and_sandbox" in agent and harness != "codex-cli":
+            raise RunnerError(
+                f"agent {agent_id}: dangerously_bypass_approvals_and_sandbox is only valid for codex-cli"
+            )
+        if codex_bypass:
+            if approval_explicit and approval_policy != "unattended":
+                raise RunnerError(
+                    f"agent {agent_id}: dangerously_bypass_approvals_and_sandbox conflicts "
+                    "with approval_policy"
+                )
+            approval_policy = "unattended"
+
         normalized = dict(agent)
         normalized.update(
             {
@@ -169,20 +273,30 @@ def validate_and_normalize(packet: dict[str, Any]) -> dict[str, Any]:
                 "goal": goal,
                 "mode": mode,
                 "harness": harness,
+                "approval_policy": approval_policy,
                 "timeout_sec": timeout_sec,
                 "max_output_bytes": max_output_bytes,
                 "allowed_paths": allowed_paths,
                 "deny_paths": deny_paths,
-                "effective_deny_paths": sorted(set([*DEFAULT_DENY_PATHS, *deny_paths])),
+                "effective_deny_paths": sorted(set([*DEFAULT_DENY, *deny_paths])),
                 "return": return_fields,
-                "allow_binary_changes": normalize_bool(agent.get("allow_binary_changes"), False),
-                "allow_deletes": normalize_bool(agent.get("allow_deletes"), False),
+                "allow_binary_changes": normalize_bool(
+                    agent.get("allow_binary_changes"),
+                    f"agent {agent_id}: allow_binary_changes",
+                    False,
+                ),
+                "allow_deletes": normalize_bool(
+                    agent.get("allow_deletes"), f"agent {agent_id}: allow_deletes", False
+                ),
                 "inherit_env": inherit_env,
                 "home_policy": home_policy,
-                "dangerously_skip_permissions": normalize_bool(
-                    agent.get("dangerously_skip_permissions"), False
+                "dangerously_skip_permissions": legacy_skip,
+                "dangerously_bypass_approvals_and_sandbox": codex_bypass,
+                "session_persistence": normalize_bool(
+                    agent.get("session_persistence"),
+                    f"agent {agent_id}: session_persistence",
+                    False,
                 ),
-                "session_persistence": normalize_bool(agent.get("session_persistence"), False),
             }
         )
         agents.append(normalized)
@@ -194,8 +308,11 @@ def load_config() -> dict[str, Any]:
     config_path = SKILL_DIR / "config.json"
     if not config_path.exists():
         return {}
-    with config_path.open("r", encoding="utf-8") as handle:
-        loaded = json.load(handle)
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RunnerError(f"Could not load config.json: {exc}") from exc
     if not isinstance(loaded, dict):
         raise RunnerError("config.json must contain an object")
     return loaded
@@ -209,8 +326,10 @@ class EventLogger:
 
     def write(self, event: str, **fields: Any) -> None:
         payload = {"event": event, "ts": now_iso(), "agent_id": self.agent_id, **fields}
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        append_bytes_no_follow(
+            self.path,
+            (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+        )
 
 
 def generate_prompt(agent: dict[str, Any]) -> str:
@@ -221,6 +340,7 @@ def generate_prompt(agent: dict[str, Any]) -> str:
 
 Agent ID: {agent['id']}
 Mode: {agent['mode']}
+Original repository subdirectory: {agent.get('repo_subdir') or '.'}
 Goal:
 {agent['goal']}
 
@@ -264,19 +384,25 @@ def initial_result(
     agent: dict[str, Any],
     agent_dir: Path,
     started_at: str,
-    status: str = "running",
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
         "agent_id": agent["id"],
-        "status": status,
+        "status": "running",
         "mode": agent["mode"],
         "harness": agent["harness"],
         "model": agent.get("model"),
+        "approval_policy": agent["approval_policy"],
+        "source_repo_root": agent.get("source_repo_root"),
+        "baseline_commit": None,
+        "baseline_manifest_path": None,
+        "baseline_manifest_sha256": None,
+        "repo_subdir": agent.get("repo_subdir") or ".",
         "summary": "",
         "files_read": [],
         "files_changed": [],
         "patch_path": None,
+        "patch_sha256": None,
         "tests_run": [],
         "risks": [],
         "recommendations": [],
@@ -316,97 +442,6 @@ def merge_result_fields(base: dict[str, Any], parsed: dict[str, Any]) -> None:
             base[key] = value
 
 
-def truncate_bytes(data: bytes, limit: int) -> bytes:
-    if len(data) <= limit:
-        return data
-    suffix = b"\n[output truncated]\n"
-    return data[: max(0, limit - len(suffix))] + suffix
-
-
-def run_sync(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            args,
-            cwd=str(cwd),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-    except FileNotFoundError:
-        return subprocess.CompletedProcess(args, 127, "", f"Command not found: {args[0]}")
-
-
-def git_root(cwd: Path) -> Path | None:
-    process = run_sync(["git", "rev-parse", "--show-toplevel"], cwd)
-    if process.returncode != 0:
-        return None
-    return Path(process.stdout.strip()).resolve()
-
-
-def cleanup_agent_dir(agent_dir: Path, repo_root: Path | None) -> None:
-    worktree = agent_dir / "worktree"
-    if worktree.exists() and repo_root is not None:
-        run_sync(["git", "worktree", "remove", "--force", str(worktree)], repo_root)
-    if agent_dir.exists():
-        shutil.rmtree(agent_dir)
-
-
-def create_worktree(repo_root: Path, worktree: Path) -> None:
-    worktree.parent.mkdir(parents=True, exist_ok=True)
-    process = run_sync(["git", "worktree", "add", "--detach", str(worktree), "HEAD"], repo_root)
-    if process.returncode != 0:
-        raise RunnerError(f"git worktree add failed: {process.stderr.strip() or process.stdout.strip()}")
-
-
-def git_status_paths(cwd: Path) -> list[str]:
-    process = run_sync(["git", "-c", "core.quotePath=false", "status", "--porcelain"], cwd)
-    if process.returncode != 0:
-        return []
-    paths: list[str] = []
-    for line in process.stdout.splitlines():
-        text = line[3:] if len(line) >= 3 else line
-        if " -> " in text:
-            paths.extend(text.split(" -> ", 1))
-        elif text:
-            paths.append(text)
-    return sorted(set(paths))
-
-
-def collect_git_diff(cwd: Path, patch_path: Path) -> str:
-    # Include untracked files as additions without staging content for commit.
-    run_sync(["git", "add", "-N", "--", "."], cwd)
-    process = run_sync(["git", "-c", "core.quotePath=false", "diff", "--binary", "HEAD", "--"], cwd)
-    diff_text = process.stdout if process.returncode == 0 else ""
-    write_text(patch_path, diff_text)
-    return diff_text
-
-
-def snapshot_files(root: Path) -> dict[str, tuple[int, str]]:
-    snapshot: dict[str, tuple[int, str]] = {}
-    skip_dirs = {".git", ".subagents"}
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in dirnames if name not in skip_dirs]
-        current = Path(dirpath)
-        for filename in filenames:
-            path = current / filename
-            try:
-                rel = path.relative_to(root).as_posix()
-                data = path.read_bytes()
-            except OSError:
-                continue
-            snapshot[rel] = (len(data), hashlib.sha256(data).hexdigest())
-    return snapshot
-
-
-def changed_snapshot_paths(before: dict[str, tuple[int, str]], after: dict[str, tuple[int, str]]) -> list[str]:
-    changed = []
-    for path in sorted(set(before) | set(after)):
-        if before.get(path) != after.get(path):
-            changed.append(path)
-    return changed
-
-
 def build_env(agent: dict[str, Any], agent_dir: Path, cwd: Path) -> dict[str, str]:
     env = dict(os.environ) if agent.get("inherit_env", True) else {}
     if agent["harness"] == "fake" or not agent.get("inherit_env", True):
@@ -416,6 +451,8 @@ def build_env(agent: dict[str, Any], agent_dir: Path, cwd: Path) -> dict[str, st
     absolute_cwd = cwd.resolve()
     tmp = absolute_agent_dir / "tmp"
     cache = absolute_agent_dir / "cache"
+    config = absolute_agent_dir / "config"
+    data = absolute_agent_dir / "data"
     home = absolute_agent_dir / "home"
     if agent.get("home_policy", "isolated") == "host":
         host_home = env.get("HOME")
@@ -425,7 +462,7 @@ def build_env(agent: dict[str, Any], agent_dir: Path, cwd: Path) -> dict[str, st
         directories = (tmp, cache)
     else:
         home_value = str(home)
-        directories = (home, tmp, cache)
+        directories = (home, tmp, cache, config, data)
     for path in directories:
         path.mkdir(parents=True, exist_ok=True)
 
@@ -441,128 +478,62 @@ def build_env(agent: dict[str, Any], agent_dir: Path, cwd: Path) -> dict[str, st
             "PWD": str(absolute_cwd),
         }
     )
+    if agent.get("home_policy", "isolated") == "isolated":
+        vendor_home = absolute_agent_dir / "vendor-home"
+        grok_home = vendor_home / "grok"
+        codex_home = vendor_home / "codex"
+        claude_home = vendor_home / "claude"
+        for path in (grok_home, codex_home, claude_home):
+            path.mkdir(parents=True, exist_ok=True)
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(config),
+                "XDG_DATA_HOME": str(data),
+                "GROK_HOME": str(grok_home),
+                "CODEX_HOME": str(codex_home),
+                "CLAUDE_CONFIG_DIR": str(claude_home),
+            }
+        )
     return env
 
 
-def format_custom_argv(template: list[Any], values: dict[str, str]) -> list[str]:
-    argv: list[str] = []
-    i = 0
-    while i < len(template):
-        token = str(template[i])
-        if token.startswith("-") and i + 1 < len(template):
-            next_token = str(template[i + 1])
-            if next_token.startswith("{") and next_token.endswith("}") and values.get(next_token[1:-1], "") == "":
-                i += 2
-                continue
-        for key, value in values.items():
-            token = token.replace("{" + key + "}", value)
-        if token != "":
-            argv.append(token)
-        i += 1
-    return argv
+def _safe_fake_patch_target(cwd: Path, raw_path: str) -> tuple[Path, str]:
+    try:
+        normalized = normalize_path(raw_path)
+    except PolicyParseError as exc:
+        raise RunnerError(f"fake_patch path is unsafe: {exc}") from exc
+    root = cwd.resolve()
+    target = cwd / Path(normalized)
+    try:
+        target.parent.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        raise RunnerError(f"fake_patch path escapes the isolated workspace: {raw_path}") from exc
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.parent.resolve().relative_to(root)
+    except ValueError as exc:
+        raise RunnerError(f"fake_patch parent escapes the isolated workspace: {raw_path}") from exc
+    if target.is_symlink():
+        raise RunnerError(f"fake_patch target must not be a symlink: {raw_path}")
+    return target, normalized
 
 
-def build_harness_argv(
-    agent: dict[str, Any],
-    prompt: str,
-    prompt_file: Path,
-    cwd: Path,
-    run_dir: Path,
-    agent_dir: Path,
-    config: dict[str, Any],
-) -> list[str]:
-    harness = agent["harness"]
-    values = {
-        "model": str(agent.get("model") or ""),
-        "agent": str(agent.get("agent") or ""),
-        "goal": str(agent["goal"]),
-        "prompt": prompt,
-        "prompt_file": str(prompt_file.resolve()),
-        "cwd": str(cwd.resolve()),
-        "run_dir": str(run_dir.resolve()),
-        "agent_dir": str(agent_dir.resolve()),
-    }
-    harnesses = config.get("harnesses", {})
-    if isinstance(harnesses, dict):
-        entry = harnesses.get(harness)
-        if isinstance(entry, dict) and isinstance(entry.get("argv"), list):
-            return format_custom_argv(entry["argv"], values)
-
-    if harness == "opencode":
-        argv = ["opencode", "run"]
-        if values["model"]:
-            argv.extend(["--model", values["model"]])
-        if values["agent"]:
-            argv.extend(["--agent", values["agent"]])
-        argv.append(prompt)
-        return argv
-    if harness == "claude-code":
-        argv = ["claude"]
-        if values["model"]:
-            argv.extend(["--model", values["model"]])
-        if values["agent"]:
-            argv.extend(["--agent", values["agent"]])
-        if agent.get("dangerously_skip_permissions"):
-            argv.append("--dangerously-skip-permissions")
-        if not agent.get("session_persistence"):
-            argv.append("--no-session-persistence")
-        argv.extend(["-p", prompt])
-        return argv
-    if harness == "codex-cli":
-        argv = ["codex", "exec", "--json"]
-        if values["model"]:
-            argv.extend(["--model", values["model"]])
-        argv.append(prompt)
-        return argv
-    raise RunnerError(f"No adapter for harness: {harness}")
-
-
-async def run_external_harness(
-    argv: list[str],
-    cwd: Path,
-    env: dict[str, str],
-    timeout_sec: int,
-    max_output_bytes: int,
-    stdout_path: Path,
-    stderr_path: Path,
+def _persist_fake_stream(
+    text: str,
+    path: Path,
+    limit: int,
     events: EventLogger,
-) -> tuple[int | None, bytes, bytes, str | None]:
-    events.write("command", argv=argv)
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(cwd),
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        command = argv[0] if argv else "<empty>"
-        write_text(stdout_path, "")
-        write_text(stderr_path, "")
-        events.write("stdout", bytes=0)
-        events.write("stderr", bytes=0)
-        return None, b"", b"", (
-            f"Harness command not found: {command}. "
-            "Install it or configure .agents/skills/subagent-broker/config.json."
-        )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_sec)
-    except asyncio.TimeoutError:
-        process.kill()
-        stdout, stderr = await process.communicate()
-        write_text(stdout_path, truncate_bytes(stdout, max_output_bytes).decode("utf-8", errors="replace"))
-        write_text(stderr_path, truncate_bytes(stderr, max_output_bytes).decode("utf-8", errors="replace"))
-        events.write("stdout", bytes=len(stdout))
-        events.write("stderr", bytes=len(stderr))
-        return None, stdout, stderr, "timeout"
-
-    write_text(stdout_path, truncate_bytes(stdout, max_output_bytes).decode("utf-8", errors="replace"))
-    write_text(stderr_path, truncate_bytes(stderr, max_output_bytes).decode("utf-8", errors="replace"))
-    events.write("stdout", bytes=len(stdout))
-    events.write("stderr", bytes=len(stderr))
-    return process.returncode, stdout, stderr, None
+    event: str,
+) -> tuple[str, bool]:
+    raw = text.encode("utf-8")
+    truncated = len(raw) > limit
+    captured = raw[:limit]
+    persisted = captured
+    if truncated:
+        persisted += b"\n[output truncated: max_output_bytes exceeded]\n"
+    atomic_write_bytes(path, persisted)
+    events.write(event, bytes=len(raw), truncated=truncated)
+    return captured.decode("utf-8", errors="replace"), truncated
 
 
 async def run_fake_harness(
@@ -571,7 +542,8 @@ async def run_fake_harness(
     stdout_path: Path,
     stderr_path: Path,
     events: EventLogger,
-) -> tuple[int, str, str]:
+    max_output_bytes: int,
+) -> tuple[int, str, str, bool]:
     events.write("command", argv=["fake-harness", agent["id"]])
     response = {
         "summary": "Fake analysis completed.",
@@ -588,24 +560,26 @@ async def run_fake_harness(
     if agent.get("fake_fail"):
         stdout = "Fake harness requested failure.\n"
         stderr = "fake_fail was true\n"
-        write_text(stdout_path, stdout)
-        write_text(stderr_path, stderr)
-        events.write("stdout", bytes=len(stdout.encode("utf-8")))
-        events.write("stderr", bytes=len(stderr.encode("utf-8")))
-        return 1, stdout, stderr
+        stdout, stdout_truncated = _persist_fake_stream(
+            stdout, stdout_path, max_output_bytes, events, "stdout"
+        )
+        stderr, stderr_truncated = _persist_fake_stream(
+            stderr, stderr_path, max_output_bytes, events, "stderr"
+        )
+        return 1, stdout, stderr, stdout_truncated or stderr_truncated
 
     fake_patch = agent.get("fake_patch")
     if agent["mode"] == "patch_only" and isinstance(fake_patch, dict):
         raw_path = str(fake_patch.get("path", "subagent_fake_patch.txt"))
-        target = cwd / raw_path
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target, normalized_path = _safe_fake_patch_target(cwd, raw_path)
         content = str(fake_patch.get("content", "fake patch\n"))
         if fake_patch.get("append"):
-            with target.open("a", encoding="utf-8") as handle:
-                handle.write(content)
+            append_bytes_no_follow(target, content.encode("utf-8"))
         else:
-            target.write_text(content, encoding="utf-8")
-        response["files_changed"] = sorted(set([*response.get("files_changed", []), raw_path]))
+            atomic_write_bytes(target, content.encode("utf-8"))
+        response["files_changed"] = sorted(
+            set([*response.get("files_changed", []), normalized_path])
+        )
 
     stdout = (
         "Fake harness completed.\n"
@@ -614,42 +588,19 @@ async def run_fake_harness(
         f"{JSON_END}\n"
     )
     stderr = ""
-    write_text(stdout_path, stdout)
-    write_text(stderr_path, stderr)
-    events.write("stdout", bytes=len(stdout.encode("utf-8")))
-    events.write("stderr", bytes=0)
-    await asyncio.sleep(0)
-    return 0, stdout, stderr
-
-
-async def run_policy_check(agent: dict[str, Any], patch_path: Path, events: EventLogger) -> dict[str, Any]:
-    argv = [sys.executable, str(POLICY_SCRIPT), "--patch", str(patch_path)]
-    for pattern in agent["allowed_paths"]:
-        argv.extend(["--allowed", pattern])
-    # DEFAULT_DENY_PATHS are included inside policy_check.py; pass only task deny paths.
-    for pattern in agent["deny_paths"]:
-        argv.extend(["--deny", pattern])
-    if agent.get("allow_binary_changes"):
-        argv.append("--allow-binary-changes")
-    if agent.get("allow_deletes"):
-        argv.append("--allow-deletes")
-
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    stdout, stdout_truncated = _persist_fake_stream(
+        stdout, stdout_path, max_output_bytes, events, "stdout"
     )
-    stdout, stderr = await process.communicate()
-    try:
-        result = json.loads(stdout.decode("utf-8"))
-    except json.JSONDecodeError:
-        result = {
-            "status": "failed",
-            "changed_files": [],
-            "violations": [stderr.decode("utf-8", errors="replace") or "policy_check.py did not return JSON"],
-        }
-    events.write("policy_check", status=result.get("status", "failed"))
-    return result
+    stderr, stderr_truncated = _persist_fake_stream(
+        stderr, stderr_path, max_output_bytes, events, "stderr"
+    )
+    await asyncio.sleep(0)
+    return 0, stdout, stderr, stdout_truncated or stderr_truncated
+
+
+def append_error(result: dict[str, Any], message: str) -> None:
+    current = result.get("error")
+    result["error"] = f"{current}; {message}" if current else message
 
 
 async def run_agent(
@@ -662,7 +613,13 @@ async def run_agent(
     agent = dict(agent)
     agent["run_id"] = run_id
     repo_root = git_root(repo_cwd)
-    agent_dir = run_dir / agent["id"]
+    if repo_root is not None:
+        agent["repo_subdir"] = repo_cwd.resolve().relative_to(repo_root).as_posix() or "."
+        agent["source_repo_root"] = str(repo_root)
+    else:
+        agent["repo_subdir"] = "."
+        agent["source_repo_root"] = None
+    agent_dir = safe_child(run_dir, agent["id"], "agent id")
     cleanup_agent_dir(agent_dir, repo_root)
     agent_dir.mkdir(parents=True, exist_ok=True)
 
@@ -673,7 +630,6 @@ async def run_agent(
     result_path = agent_dir / "result.json"
     task_path = agent_dir / "task.json"
     patch_path = agent_dir / "patch.diff"
-    worktree = agent_dir / "worktree"
 
     prompt = generate_prompt(agent)
     write_json(task_path, agent)
@@ -688,99 +644,213 @@ async def run_agent(
     write_json(result_path, result)
     events.write("started", message="started")
 
-    before_snapshot: dict[str, tuple[int, str]] | None = None
-    harness_cwd = repo_cwd
+    cancelled: asyncio.CancelledError | None = None
+    before_snapshot: dict[str, tuple[str, int, int, str]] | None = None
+    workspace = None
     try:
-        if agent["mode"] == "patch_only":
-            if repo_root is None:
-                raise RunnerError("patch_only requires a Git repository")
-            create_worktree(repo_root, worktree)
-            harness_cwd = worktree
-        elif repo_root is not None:
-            create_worktree(repo_root, worktree)
-            harness_cwd = worktree
-        else:
-            before_snapshot = snapshot_files(repo_cwd)
+        workspace = prepare_workspace(
+            repo_cwd,
+            agent_dir,
+            agent["effective_deny_paths"],
+            agent["mode"],
+        )
+        result["baseline_commit"] = workspace.baseline_commit
+        if workspace.baseline_manifest_sha256:
+            result["baseline_manifest_path"] = rel_display(agent_dir / "baseline_manifest.json")
+            result["baseline_manifest_sha256"] = workspace.baseline_manifest_sha256
+        if agent["mode"] == "read_only":
+            before_snapshot = snapshot_files(workspace.worktree or repo_cwd)
 
-        env = build_env(agent, agent_dir, harness_cwd)
+        env = build_env(agent, agent_dir, workspace.harness_cwd)
+        decode_error: str | None = None
+        process_error_kind: str | None = None
+        process_error: str | None = None
         if agent["harness"] == "fake":
-            returncode, stdout_text, stderr_text = await run_fake_harness(
-                agent, harness_cwd, stdout_path, stderr_path, events
+            returncode, stdout_text, stderr_text, output_truncated = await run_fake_harness(
+                agent,
+                workspace.harness_cwd,
+                stdout_path,
+                stderr_path,
+                events,
+                agent["max_output_bytes"],
             )
-            timeout_error = None
+            if output_truncated:
+                process_error_kind = "output_limit"
+                process_error = "stdout or stderr exceeded max_output_bytes"
+            normalized_output = stdout_text
         else:
-            argv = build_harness_argv(agent, prompt, prompt_path, harness_cwd, run_dir, agent_dir, config)
-            returncode, stdout_bytes, stderr_bytes, timeout_error = await run_external_harness(
-                argv,
-                harness_cwd,
+            invocation = build_harness_invocation(
+                agent,
+                prompt,
+                prompt_path,
+                workspace.harness_cwd,
+                run_dir,
+                agent_dir,
+                config,
+            )
+            outcome = await run_external_harness(
+                invocation,
+                workspace.harness_cwd,
                 env,
                 agent["timeout_sec"],
                 agent["max_output_bytes"],
                 stdout_path,
                 stderr_path,
-                events,
+                events.write,
             )
-            stdout_text = stdout_bytes.decode("utf-8", errors="replace")
-            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            returncode = outcome.returncode
+            stdout_text = outcome.stdout
+            stderr_text = outcome.stderr
+            process_error_kind = outcome.error_kind
+            process_error = outcome.error
+            normalized_output = stdout_text
+            if process_error_kind not in {"output_limit", "timeout", "command_not_found"}:
+                decoded = decode_harness_output(agent["harness"], stdout_text)
+                normalized_output = decoded.text
+                decode_error = decoded.error
 
-        parsed = parse_subagent_result(stdout_text)
-        merge_result_fields(result, parsed)
-
-        if timeout_error == "timeout":
+        merge_result_fields(result, parse_subagent_result(normalized_output))
+        if process_error_kind == "timeout":
             result["status"] = "timeout"
-            result["error"] = "timeout"
-        elif timeout_error:
+            result["error"] = process_error or "timeout"
+        elif process_error_kind == "output_limit":
+            result["status"] = "output_limit"
+            result["error"] = process_error or "output limit exceeded"
+        elif process_error_kind:
             result["status"] = "failed"
-            result["error"] = timeout_error
+            result["error"] = process_error or process_error_kind
         elif returncode != 0:
             result["status"] = "failed"
-            result["error"] = stderr_text.strip() or stdout_text.strip() or f"harness exited with code {returncode}"
+            details = list(
+                dict.fromkeys(
+                    detail
+                    for detail in (stderr_text.strip(), decode_error)
+                    if isinstance(detail, str) and detail
+                )
+            )
+            if not details and normalized_output.strip():
+                details.append(normalized_output.strip()[:2000])
+            details.append(f"harness exited with code {returncode}")
+            result["error"] = "; ".join(details)
+        elif decode_error:
+            result["status"] = "failed"
+            result["error"] = decode_error
         else:
             result["status"] = "completed"
 
+        verify_workspace_identity(workspace)
         if agent["mode"] == "read_only":
-            if repo_root is not None and worktree.exists():
-                changed = git_status_paths(worktree)
+            if workspace.worktree is not None:
+                assert before_snapshot is not None
+                changed = changed_snapshot_paths(
+                    before_snapshot,
+                    snapshot_files(workspace.worktree),
+                )
                 if changed:
-                    collect_git_diff(worktree, patch_path)
                     result["files_changed"] = changed
-                    result["patch_path"] = rel_display(patch_path)
                     result["status"] = "failed"
-                    result["error"] = "read_only job modified files"
+                    append_error(result, "read_only job modified files")
             elif before_snapshot is not None:
                 changed = changed_snapshot_paths(before_snapshot, snapshot_files(repo_cwd))
                 if changed:
                     result["files_changed"] = changed
                     result["status"] = "failed"
-                    result["error"] = "read_only job modified files"
+                    append_error(result, "read_only job modified files")
 
         if agent["mode"] == "patch_only":
-            collect_git_diff(worktree, patch_path)
-            result["patch_path"] = rel_display(patch_path)
-            events.write("patch_created", path=rel_display(patch_path))
-            policy = await run_policy_check(agent, patch_path, events)
-            result["policy"] = policy
-            if isinstance(policy, dict) and isinstance(policy.get("changed_files"), list):
-                result["files_changed"] = policy["changed_files"]
-            if result["status"] == "completed" and policy.get("status") != "passed":
-                result["status"] = "policy_failed"
-                result["error"] = "; ".join(policy.get("violations", [])) or "patch policy failed"
+            assert workspace.worktree is not None
+            assert workspace.baseline_commit is not None
+            restore_trusted_git_metadata(workspace)
+            changed = git_changed_paths(workspace.worktree, workspace.baseline_commit)
+            path_policy = check_paths(changed, agent["allowed_paths"], agent["deny_paths"])
+            result["files_changed"] = path_policy["changed_files"]
+            if path_policy["status"] != "passed":
+                result["policy"] = path_policy
+                events.write("policy_check", status="failed", phase="paths")
+                if result["status"] == "completed":
+                    result["status"] = "policy_failed"
+                    result["error"] = "; ".join(path_policy["violations"])
+            else:
+                artifact = collect_git_diff(
+                    workspace.worktree,
+                    workspace.baseline_commit,
+                    changed,
+                )
+                staged_policy = check_paths(
+                    artifact.changed_paths,
+                    agent["allowed_paths"],
+                    agent["deny_paths"],
+                )
+                current_paths = git_changed_paths(
+                    workspace.worktree,
+                    workspace.baseline_commit,
+                )
+                current_policy = check_paths(
+                    current_paths,
+                    agent["allowed_paths"],
+                    agent["deny_paths"],
+                )
+                if staged_policy["status"] != "passed" or current_policy["status"] != "passed":
+                    policy = (
+                        staged_policy if staged_policy["status"] != "passed" else current_policy
+                    )
+                    result["policy"] = policy
+                    result["files_changed"] = policy["changed_files"]
+                    events.write("policy_check", status="failed", phase="staged_paths")
+                    if result["status"] == "completed":
+                        result["status"] = "policy_failed"
+                        result["error"] = "; ".join(policy["violations"])
+                    continue_patch = False
+                else:
+                    continue_patch = True
 
-    except RunnerError as exc:
+                if not continue_patch:
+                    artifact = None
+                else:
+                    atomic_write_bytes(patch_path, artifact.data)
+                    result["patch_path"] = rel_display(patch_path)
+                    result["patch_sha256"] = hashlib.sha256(artifact.data).hexdigest()
+                    events.write("patch_created", path=rel_display(patch_path))
+                    policy = check_policy(
+                        artifact.data,
+                        agent["allowed_paths"],
+                        agent["deny_paths"],
+                        allow_binary_changes=agent["allow_binary_changes"],
+                        allow_deletes=agent["allow_deletes"],
+                        changed_paths=artifact.changed_paths,
+                        has_binary_changes=artifact.has_binary_changes,
+                        has_deletes=artifact.has_deletes,
+                    )
+                result["policy"] = policy
+                result["files_changed"] = policy["changed_files"]
+                if continue_patch:
+                    events.write("policy_check", status=policy["status"], phase="patch")
+                if result["status"] == "completed" and policy["status"] != "passed":
+                    result["status"] = "policy_failed"
+                    result["error"] = "; ".join(policy["violations"]) or "patch policy failed"
+
+    except asyncio.CancelledError as exc:
+        result["status"] = "cancelled"
+        result["error"] = "cancelled"
+        cancelled = exc
+    except (RunnerError, RunnerRuntimeError, HarnessAdapterError) as exc:
         result["status"] = "failed"
         result["error"] = str(exc)
     except Exception as exc:  # noqa: BLE001 - result.json must be written on all failures.
         result["status"] = "failed"
         result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
-        ended_at = now_iso()
-        result["ended_at"] = ended_at
+        result["ended_at"] = now_iso()
         result["duration_sec"] = round(time.monotonic() - started_time, 3)
-        if result["status"] in {"completed"}:
+        if result["status"] == "completed":
             events.write("completed", status=result["status"])
+        elif result["status"] == "cancelled":
+            events.write("cancelled", error=result["error"])
         else:
             events.write("failed", error=result.get("error") or result["status"])
         write_json(result_path, result)
+    if cancelled is not None:
+        raise cancelled
     return result
 
 
@@ -789,16 +859,22 @@ def aggregate_status(results: list[dict[str, Any]]) -> str:
         return "completed"
     if any(result.get("status") == "running" for result in results):
         return "running"
+    if any(result.get("status") == "cancelled" for result in results):
+        return "cancelled"
     return "failed"
 
 
-def write_run_result(run_dir: Path, run_id: str, results: list[dict[str, Any]], started_at: str) -> dict[str, Any]:
-    ended_at = now_iso()
+def write_run_result(
+    run_dir: Path,
+    run_id: str,
+    results: list[dict[str, Any]],
+    started_at: str,
+) -> dict[str, Any]:
     payload = {
         "run_id": run_id,
         "status": aggregate_status(results),
         "started_at": started_at,
-        "ended_at": ended_at,
+        "ended_at": now_iso(),
         "agents": results,
     }
     write_json(run_dir / "result.json", payload)
@@ -831,7 +907,9 @@ def write_summary(run_dir: Path, aggregate: dict[str, Any]) -> None:
                 f"Status: {result.get('status')}",
                 f"Harness: {result.get('harness')}",
                 f"Mode: {result.get('mode')}",
+                f"Approval: {result.get('approval_policy')}",
                 f"Model: {result.get('model') or 'none'}",
+                f"Baseline: {result.get('baseline_commit') or 'none'}",
                 "",
                 "Summary:",
                 str(result.get("summary") or "No summary returned."),
@@ -875,7 +953,10 @@ async def run_packet(args: argparse.Namespace) -> int:
     packet = validate_and_normalize(load_task_packet(Path(args.task_packet)))
     config = load_config()
     run_id = packet["run_id"]
-    run_dir = Path(".subagents") / run_id
+    output_root = Path(".subagents")
+    if output_root.is_symlink():
+        raise RunnerError(".subagents output root must not be a symlink")
+    run_dir = safe_child(output_root, run_id, "run_id")
     run_dir.mkdir(parents=True, exist_ok=True)
     write_json(run_dir / "tasks.normalized.json", packet)
 
@@ -888,7 +969,17 @@ async def run_packet(args: argparse.Namespace) -> int:
         async with semaphore:
             return await run_agent(run_id, agent, run_dir, Path.cwd(), config)
 
-    results = await asyncio.gather(*(limited(agent) for agent in packet["agents"]))
+    tasks = [asyncio.create_task(limited(agent)) for agent in packet["agents"]]
+    try:
+        results = await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        partial_results = load_agent_results(run_dir)
+        if partial_results:
+            write_run_result(run_dir, run_id, partial_results, started_at)
+        raise
     aggregate = write_run_result(run_dir, run_id, results, started_at)
     print(rel_display(run_dir / "summary.md"))
     return 0 if aggregate["status"] == "completed" else 1

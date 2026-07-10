@@ -4,6 +4,7 @@
     "timeout_sec": 600,
     "mode": "read_only",
     "harness": "fake",
+    "approval_policy": "default",
     "model": "fake-cheap"
   },
   "agents": [
