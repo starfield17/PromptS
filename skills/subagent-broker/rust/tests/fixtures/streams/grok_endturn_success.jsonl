@@ -1,0 +1,5 @@
+//! Desensitized Grok Build streaming-json sample (real format, 2026).
+{"type":"thought","data":"The"}
+{"type":"thought","data":" user"}
+{"type":"text","data":"pong"}
+{"type":"end","stopReason":"EndTurn","sessionId":"sess-desensitized","requestId":"req-desensitized"}

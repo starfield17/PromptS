@@ -1,0 +1,3 @@
+{"type": "system", "subtype": "init", "session_id": "sess-bad", "model": "claude-sonnet-4-20250514", "provider": "anthropic"}
+this is not json at all {{{
+{"type": "result", "subtype": "success", "is_error": false, "result": "recovered after bad line", "session_id": "sess-bad", "model": "claude-sonnet-4-20250514"}

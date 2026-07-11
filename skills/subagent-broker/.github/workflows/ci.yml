@@ -1,0 +1,137 @@
+name: subagent-broker-v3.1
+
+on:
+  push:
+    paths:
+      - "**"
+  pull_request:
+    paths:
+      - "**"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+      - run: cargo check --workspace --all-targets --all-features --locked
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: subagent-broker/rust
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: check
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --all-features | tee ../test-report.txt
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: audit
+        run: cargo audit | tee ../audit-report.txt
+
+      - name: deny
+        run: cargo deny check | tee ../dependency-license-report.txt
+
+      - name: release build
+        run: cargo build --release --locked
+
+      - name: Install cross and CycloneDX
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross,cargo-cyclonedx
+
+      - name: aarch64 release build
+        run: cross build --release --locked --target aarch64-unknown-linux-gnu
+
+      - name: SBOM
+        run: cargo cyclonedx --format json
+
+      - name: smoke + validate-skill
+        working-directory: .
+        run: |
+          mkdir -p bin/linux-x86_64 bin/linux-aarch64
+          cp -f rust/target/release/subagent-broker bin/linux-x86_64/subagent-broker
+          cp -f rust/target/aarch64-unknown-linux-gnu/release/subagent-broker bin/linux-aarch64/subagent-broker
+          chmod +x bin/linux-x86_64/subagent-broker bin/linux-aarch64/subagent-broker
+          chmod +x scripts/subagent-broker tests/smoke.sh scripts/release_metadata.sh
+          chmod +x tests/patch_smoke.sh tests/fixtures/*.sh
+          ./tests/smoke.sh
+          ./tests/patch_smoke.sh
+          ./scripts/subagent-broker validate-skill .
+          ./scripts/release_metadata.sh
+
+      - name: assemble and test release ZIP
+        working-directory: .
+        run: |
+          rm -rf release-staging release-zip-check
+          mkdir -p release-staging/subagent-broker-v3/bin/linux-x86_64
+          mkdir -p release-staging/subagent-broker-v3/bin/linux-aarch64
+          cp -a SKILL.md agents references templates scripts tests release-staging/subagent-broker-v3/
+          mkdir -p release-staging/subagent-broker-v3/rust
+          cp -a rust/Cargo.toml rust/Cargo.lock rust/deny.toml rust/src rust/tests rust/fuzz release-staging/subagent-broker-v3/rust/
+          mkdir -p release-staging/subagent-broker-v3/release
+          cp test-report.txt audit-report.txt dependency-license-report.txt release-staging/subagent-broker-v3/release/
+          cp rust/subagent_broker.cdx.json release-staging/subagent-broker-v3/release/ || cp rust/bom.json release-staging/subagent-broker-v3/release/
+          cp -a bin/linux-x86_64/subagent-broker release-staging/subagent-broker-v3/bin/linux-x86_64/
+          cp -a bin/linux-aarch64/subagent-broker release-staging/subagent-broker-v3/bin/linux-aarch64/
+          chmod +x release-staging/subagent-broker-v3/scripts/subagent-broker
+          chmod +x release-staging/subagent-broker-v3/scripts/*.sh
+          chmod +x release-staging/subagent-broker-v3/bin/linux-x86_64/subagent-broker
+          chmod +x release-staging/subagent-broker-v3/bin/linux-aarch64/subagent-broker
+          release-staging/subagent-broker-v3/scripts/release_metadata.sh > release-staging/subagent-broker-v3/release/release-metadata.txt
+          sha256sum bin/linux-x86_64/subagent-broker > release-staging/subagent-broker-v3/bin/linux-x86_64/subagent-broker.sha256
+          sha256sum bin/linux-aarch64/subagent-broker > release-staging/subagent-broker-v3/bin/linux-aarch64/subagent-broker.sha256
+          (cd release-staging && zip -qr ../subagent-broker-v3-linux.zip subagent-broker-v3)
+          mkdir -p release-zip-check
+          unzip -q subagent-broker-v3-linux.zip -d release-zip-check
+          ./release-zip-check/subagent-broker-v3/scripts/subagent-broker validate-skill release-zip-check/subagent-broker-v3
+          SUBAGENT_BROKER_BIN="$PWD/release-zip-check/subagent-broker-v3/scripts/subagent-broker" SUBAGENT_BROKER_FIXTURE="$PWD/release-zip-check/subagent-broker-v3/tests/fixtures/fixture-harness.sh" ./tests/smoke.sh
+          SUBAGENT_BROKER_BIN="$PWD/release-zip-check/subagent-broker-v3/scripts/subagent-broker" SUBAGENT_BROKER_PATCH_FIXTURE="$PWD/release-zip-check/subagent-broker-v3/tests/fixtures/patch-fixture-harness.sh" ./tests/patch_smoke.sh
+          test "$(sha256sum bin/linux-x86_64/subagent-broker | awk '{print $1}')" = "$(sha256sum release-zip-check/subagent-broker-v3/bin/linux-x86_64/subagent-broker | awk '{print $1}')"
+          test "$(sha256sum bin/linux-aarch64/subagent-broker | awk '{print $1}')" = "$(sha256sum release-zip-check/subagent-broker-v3/bin/linux-aarch64/subagent-broker | awk '{print $1}')"
+
+      - name: Collect release artifacts
+        working-directory: .
+        run: |
+          mkdir -p release-artifacts
+          cp rust/target/release/subagent-broker release-artifacts/subagent-broker-linux-x86_64
+          cp rust/target/aarch64-unknown-linux-gnu/release/subagent-broker release-artifacts/subagent-broker-linux-aarch64
+          cp subagent-broker-v3-linux.zip release-artifacts/
+          cp rust/subagent_broker.cdx.json release-artifacts/ || cp rust/bom.json release-artifacts/
+          cp test-report.txt audit-report.txt dependency-license-report.txt release-artifacts/
+          scripts/release_metadata.sh > release-artifacts/release-metadata.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subagent-broker-v3-linux
+          path: release-artifacts/

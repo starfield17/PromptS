@@ -1,157 +1,96 @@
 # Examples
 
-## Read-only Repo Exploration
+## Fixture smoke (development only)
 
 ```json
 {
-  "run_id": "repo-map",
-  "defaults": {"timeout_sec": 600, "mode": "read_only", "harness": "fake"},
+  "schema_version": 3,
+  "run_id": "demo-fixture",
   "agents": [
     {
-      "id": "map",
-      "goal": "Map the repository structure and identify likely test locations.",
-      "allowed_paths": ["**"],
-      "deny_paths": [".env*", ".git/**", "secrets/**"],
-      "return": ["summary", "file_refs", "recommendations"]
+      "id": "mapper",
+      "goal": "Map the repository structure.",
+      "harness": {
+        "kind": "custom",
+        "executable": "/path/to/fixture-harness.sh",
+        "stream_family": "claude_stream_json"
+      },
+      "mode": "read_only",
+      "requested_permissions": ["repo_read"]
     }
   ]
 }
 ```
 
-Run:
-
 ```bash
-python .agents/skills/subagent-broker/scripts/subagent_runner.py run tasks.json --wait
+scripts/subagent-broker run tasks.json
+scripts/subagent-broker status .subagents/demo-fixture
 ```
 
-## Parallel Review
+## Real harness smoke (use host home for login/OAuth)
+
+Isolated `home` redirects `HOME` / `GROK_HOME` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME` into a sandbox.
+Real Claude / Grok / Codex sessions then ask the user to log in and often produce **no usable stream**.
+
+For real CLI runs on a developer machine, set **`environment.home: host`**:
 
 ```json
 {
-  "run_id": "parallel-review",
-  "defaults": {"timeout_sec": 600, "mode": "read_only", "harness": "fake"},
+  "schema_version": 3,
+  "run_id": "real-smoke",
   "agents": [
-    {"id": "api-review", "goal": "Review API error handling.", "allowed_paths": ["src/api/**"], "return": ["summary", "risks"]},
-    {"id": "test-review", "goal": "Review test coverage gaps.", "allowed_paths": ["tests/**"], "return": ["summary", "recommendations"]}
+    {
+      "id": "worker",
+      "goal": "Reply with exactly: pong. Do not use tools.",
+      "harness": { "kind": "grok_build" },
+      "mode": "read_only",
+      "requested_permissions": ["repo_read"],
+      "environment": {
+        "home": "host",
+        "allowed_env": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY"]
+      }
+    }
   ]
 }
 ```
 
-## Patch-only Test Generation
+Default for automation remains **`home: isolated`** (reproducible, no host secrets). The in-process `fake` harness is compiled only with the `dev-harness` Cargo feature and is not accepted by release binaries.
+
+## Claude read-only review with identity required
+
+See `templates/task.v3.example.json`.
+
+## Patch-only agent
 
 ```json
 {
-  "run_id": "test-patch",
-  "defaults": {"timeout_sec": 900, "harness": "fake"},
+  "schema_version": 3,
+  "run_id": "patch-demo",
   "agents": [
     {
-      "id": "add-tests",
+      "id": "fixer",
+      "goal": "Add a unit test for path validation.",
+      "harness": { "kind": "claude_code", "model": "claude-sonnet-4-20250514" },
       "mode": "patch_only",
-      "goal": "Add missing tests for edge cases.",
-      "allowed_paths": ["tests/**"],
-      "deny_paths": [".env*", ".git/**", "secrets/**"],
-      "return": ["summary", "patch", "tests_run", "risks"],
-      "fake_patch": {"path": "tests/test_generated.py", "content": "def test_generated():\n    assert True\n"}
+      "requested_permissions": ["repo_read", "patch"],
+      "allowed_paths": ["src/**", "tests/**"],
+      "deny_paths": [".env*", "secrets/**"],
+      "environment": { "home": "host" },
+      "patch_policy": { "allow_deletes": false, "allow_binary_changes": false }
     }
   ]
 }
 ```
-
-## OpenCode Adapter Task
-
-```json
-{
-  "run_id": "opencode-review",
-  "defaults": {"timeout_sec": 900, "mode": "read_only", "harness": "opencode"},
-  "agents": [
-    {
-      "id": "review",
-      "model": "deepseek/deepseek-chat",
-      "goal": "Review auth code for obvious correctness risks.",
-      "allowed_paths": ["src/auth/**", "tests/auth/**"],
-      "deny_paths": [".env*", ".git/**", "secrets/**"],
-      "return": ["summary", "risks", "recommendations"]
-    }
-  ]
-}
-```
-
-## Claude Code Adapter Task
-
-```json
-{
-  "run_id": "claude-review",
-  "defaults": {"timeout_sec": 900, "mode": "read_only", "harness": "claude-code"},
-  "agents": [
-    {
-      "id": "review",
-      "home_policy": "host",
-      "goal": "Review the test suite organization and recommend focused improvements.",
-      "allowed_paths": ["tests/**"],
-      "deny_paths": [".env*", ".git/**", "secrets/**"],
-      "return": ["summary", "recommendations", "risks"]
-    }
-  ]
-}
-```
-
-Claude defaults to `bounded`; this read-only task needs no Bash permission. For a patch task that runs tests, set `mode` to `patch_only` and add only the required command family, for example `"allowed_tools": ["Bash(python -m pytest *)"]`. Exact flag sequences are brittle because Claude may choose equivalent flags or ordering.
-
-## Grok Build Read-only Review
-
-```json
-{
-  "run_id": "grok-review",
-  "defaults": {
-    "timeout_sec": 900,
-    "mode": "read_only",
-    "harness": "grok-build"
-  },
-  "agents": [
-    {
-      "id": "review",
-      "home_policy": "host",
-      "goal": "Review the API implementation for correctness risks without changing files.",
-      "allowed_paths": ["src/api/**", "tests/api/**"],
-      "return": ["summary", "risks", "recommendations"]
-    }
-  ]
-}
-```
-
-`home_policy: "host"` reuses the local Grok login and configuration. Omit it when using environment-based authentication and an isolated Grok home.
-
-## Grok Build Patch Task
-
-```json
-{
-  "run_id": "grok-tests",
-  "defaults": {
-    "timeout_sec": 900,
-    "mode": "patch_only",
-    "harness": "grok-build",
-    "approval_policy": "unattended"
-  },
-  "agents": [
-    {
-      "id": "add-tests",
-      "home_policy": "host",
-      "goal": "Add focused regression tests for the reported parser bug.",
-      "allowed_paths": ["tests/parser/**"],
-      "deny_paths": ["tests/fixtures/private/**"],
-      "return": ["summary", "patch", "tests_run", "risks"]
-    }
-  ]
-}
-```
-
-`unattended` maps to Grok `--always-approve`; this patch task uses it so tool approvals cannot stall the headless run. Prefer `default` whenever the task can complete without broad vendor approval. The broker still verifies paths, patch bytes, and the source baseline before application.
-
-## Checking and Applying a Patch
 
 ```bash
-python .agents/skills/subagent-broker/scripts/merge_patches.py --check .subagents/<run_id>/<agent_id>/patch.diff
-python .agents/skills/subagent-broker/scripts/merge_patches.py --apply .subagents/<run_id>/<agent_id>/patch.diff
+scripts/subagent-broker run tasks.json
+scripts/subagent-broker patch check .subagents/patch-demo/fixer/patch.diff
+# review, then:
+scripts/subagent-broker patch apply .subagents/patch-demo/fixer/patch.diff
 ```
 
-Run these commands from the original source repository. The apply command requires a completed result, passed policy, matching artifact hashes, the recorded source root, and an unchanged source baseline. It does not stage or commit.
+## Doctor
+
+```bash
+scripts/subagent-broker doctor
+```

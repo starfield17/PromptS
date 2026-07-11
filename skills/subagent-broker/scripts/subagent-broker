@@ -1,0 +1,33 @@
+#!/usr/bin/env sh
+# Architecture-selecting launcher for the packaged subagent-broker binary.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+case "$(uname -s)" in
+  Linux) ;;
+  *)
+    echo "subagent-broker: unsupported operating system (Linux required)" >&2
+    exit 2
+    ;;
+esac
+
+case "$(uname -m)" in
+  x86_64|amd64) target="linux-x86_64" ;;
+  aarch64|arm64) target="linux-aarch64" ;;
+  *)
+    echo "subagent-broker: unsupported architecture: $(uname -m)" >&2
+    exit 2
+    ;;
+esac
+
+binary="$ROOT/bin/$target/subagent-broker"
+if [ ! -f "$binary" ]; then
+  echo "subagent-broker: packaged binary missing: $binary" >&2
+  exit 2
+fi
+if [ ! -x "$binary" ]; then
+  echo "subagent-broker: packaged binary is not executable: $binary" >&2
+  exit 2
+fi
+
+exec "$binary" "$@"

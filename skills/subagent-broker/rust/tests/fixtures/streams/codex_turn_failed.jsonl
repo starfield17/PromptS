@@ -1,0 +1,2 @@
+{"type": "thread.started", "model": "o4-mini", "provider": "openai"}
+{"type": "turn.failed", "error": "model overloaded", "message": "turn failed for test"}

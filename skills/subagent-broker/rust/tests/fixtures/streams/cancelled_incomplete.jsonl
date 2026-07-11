@@ -1,0 +1,2 @@
+{"type": "system", "subtype": "init", "session_id": "sess-c"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "starting..."}]}}

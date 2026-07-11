@@ -1,0 +1,48 @@
+{
+  "schema_version": 3,
+  "run_id": "review-001",
+  "max_concurrency": 2,
+  "agents": [
+    {
+      "id": "reviewer",
+      "goal": "Review parser behavior and return findings.",
+      "harness": {
+        "kind": "claude_code",
+        "model": "claude-sonnet-4-20250514"
+      },
+      "mode": "read_only",
+      "isolation": "copy_isolation",
+      "source_root": ".",
+      "allowed_paths": ["src/**", "tests/**"],
+      "deny_paths": [],
+      "requested_permissions": ["repo_read"],
+      "identity": {
+        "required": true,
+        "expected_provider": "anthropic",
+        "expected_model_prefix": "claude-",
+        "expected_executable_realpath": null,
+        "expected_executable_sha256": null
+      },
+      "environment": {
+        "home": "isolated",
+        "allowed_env": []
+      },
+      "limits": {
+        "timeout_ms": 1800000,
+        "idle_timeout_ms": 180000,
+        "term_grace_ms": 1500,
+        "pipe_grace_ms": 1000,
+        "max_result_bytes": 262144,
+        "max_raw_log_bytes": 1048576,
+        "max_event_line_bytes": 8388608,
+        "max_workspace_files": 25000,
+        "max_workspace_bytes": 1073741824,
+        "max_files_changed": 50
+      },
+      "patch_policy": {
+        "allow_deletes": false,
+        "allow_binary_changes": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "schema_version": 3,
+  "revision": 12,
+  "run_id": "review-001",
+  "phase": "finished",
+  "outcome": "blocked",
+  "reason": "provider_mismatch",
+  "started_at": "2026-01-01T00:00:00Z",
+  "ended_at": "2026-01-01T00:01:00Z",
+  "agents": [
+    {
+      "revision": 12,
+      "agent_id": "reviewer",
+      "phase": "finished",
+      "mode": "read_only",
+      "isolation": "copy_isolation",
+      "outcome": "blocked",
+      "reason": "provider_mismatch",
+      "requested": {
+        "harness": "claude_code",
+        "model": "claude-sonnet-4-20250514"
+      },
+      "executable": {
+        "argv0": "claude",
+        "path": "/usr/bin/claude",
+        "realpath": "/usr/bin/claude",
+        "sha256": null,
+        "version": "1.0.0",
+        "version_verified": true,
+        "trust": "stock_adapter"
+      },
+      "observed": {
+        "provider": "xai",
+        "model": "grok-code-fast",
+        "api_key_source": null,
+        "evidence": "stream_claim"
+      },
+      "identity_gate": {
+        "required": true,
+        "satisfied": false,
+        "reason": "provider_mismatch"
+      },
+      "permission_denials": [],
+      "harness_completed": true,
+      "response": {
+        "summary": "done via wrong provider",
+        "truncated": false,
+        "original_bytes": 22,
+        "tests": {
+          "verification": "self_reported",
+          "items": [],
+          "results": []
+        }
+      },
+      "workspace": {
+        "files_changed": []
+      },
+      "environment": {
+        "home": "isolated",
+        "allowed_env_names": [],
+        "host_configuration_exposed": false,
+        "reproducibility": "full"
+      },
+      "patch": null,
+      "diagnostics": {
+        "raw_stdout_truncated": false,
+        "raw_stderr_truncated": false,
+        "stdout_total_bytes": 256,
+        "stderr_total_bytes": 0,
+        "stdout_persisted_bytes": 64,
+        "stderr_persisted_bytes": 0,
+        "descendants_terminated": false,
+        "exit_code": 0
+        ,"unknown_event_count": 0
+        ,"invalid_json_count": 0
+        ,"oversized_event_count": 0
+        ,"events_dropped": 0
+      }
+    }
+  ]
+}
