@@ -1,3 +1,0 @@
-{"type": "system", "subtype": "init", "session_id": "sess-uf", "model": "claude-sonnet-4-20250514", "provider": "anthropic"}
-{"type": "future_widget", "payload": {"x": 1}, "version": 99}
-{"type": "result", "subtype": "success", "is_error": false, "result": "ok after unknown", "session_id": "sess-uf"}

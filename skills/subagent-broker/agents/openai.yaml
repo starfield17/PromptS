@@ -1,4 +1,0 @@
-interface:
-  display_name: "Subagent Broker"
-  short_description: "Run isolated parallel coding subagents (V3)"
-  default_prompt: "Use $subagent-broker with a schema_version 3 task packet to delegate bounded read-only or patch-only coding tasks."
