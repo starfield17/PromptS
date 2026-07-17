@@ -1,4 +1,4 @@
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code/Codex/Other agent when working with code in this repository.
 
 Think Before Coding
 Don't assume. Don't hide confusion. Surface tradeoffs.
