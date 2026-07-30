@@ -1,1 +1,0 @@
-"""Render structured research artifacts."""

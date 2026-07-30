@@ -1,4 +1,0 @@
-interface:
-  display_name: "Ensemble Buy-side Research"
-  short_description: "Buy-side thesis research and data pipeline"
-  default_prompt: "Use $ensemble-buy-side-research to analyze a market direction, map the value chain, and generate a falsifiable buy-side research memo."
