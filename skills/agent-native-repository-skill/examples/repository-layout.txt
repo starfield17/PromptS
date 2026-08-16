@@ -1,0 +1,29 @@
+example-project/
+├── AGENTS.md
+├── Makefile
+├── architecture/
+│   ├── dependency-policy.yaml
+│   └── test_architecture.py
+├── src/
+│   ├── core/
+│   └── modules/
+│       ├── training/
+│       │   ├── AGENTS.md
+│       │   ├── api.py
+│       │   ├── domain.py
+│       │   ├── ports.py
+│       │   ├── adapters/
+│       │   └── tests/
+│       └── deploy/
+│           ├── AGENTS.md
+│           ├── api.py
+│           ├── ports.py
+│           ├── adapters/
+│           └── tests/
+└── tests/
+
+Notes:
+- Remove unused layers/directories instead of preserving empty symmetry.
+- Keep core small.
+- Put tests near capability behavior when practical.
+- Architecture tests describe real repository policy, not generic style preferences.

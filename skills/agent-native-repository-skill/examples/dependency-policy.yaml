@@ -1,0 +1,17 @@
+# Example policy data for a custom architecture checker.
+modules:
+  training:
+    allowed:
+      - core
+      - model_api
+    forbidden:
+      - deploy.internal
+  deploy:
+    allowed:
+      - core
+      - model_api
+    forbidden:
+      - training.internal
+rules:
+  forbid_cycles: true
+  forbid_internal_cross_module_imports: true
