@@ -1,7 +1,7 @@
 interface:
   display_name: "Sol Supervisor"
   short_description: "Sol decides; Terra synthesizes; Luna executes"
-  default_prompt: "Use $sol-supervisor to supervise this coding task and route bounded work to Terra or Luna when useful."
+  default_prompt: "Use $sol-supervisor for this coding task. Proactively delegate eligible bounded exploration, implementation, testing, and pre-review so Sol preserves context for decisions, integration, and final acceptance. Use Luna at xhigh/max and Terra at high/xhigh; avoid Terra max."
 
 policy:
   allow_implicit_invocation: true

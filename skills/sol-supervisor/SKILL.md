@@ -1,6 +1,6 @@
 ---
 name: sol-supervisor
-description: Use a primary GPT-5.6 Sol agent to supervise non-trivial coding work, routing bounded subagent tasks to GPT-5.6 Luna for throughput and GPT-5.6 Terra for broad-context synthesis, debugging, and pre-review. Sol owns architecture, high-risk judgment, integration, and final acceptance.
+description: Use a primary GPT-5.6 Sol agent to supervise non-trivial coding work. Proactively delegate eligible bounded work to GPT-5.6 Luna for throughput and GPT-5.6 Terra for broad-context synthesis, debugging, and pre-review so the primary Sol context stays focused on decisions, integration, and final acceptance.
 ---
 
 # Sol Supervisor
@@ -12,6 +12,7 @@ Use the primary GPT-5.6 Sol agent as the root supervisor.
 - **Sol owns decisions.** Architecture, invariants, ambiguous diagnosis, risky tradeoffs, integration, and final acceptance stay with the primary agent.
 - **Terra owns bounded synthesis.** Use Terra when the work is broad or context-heavy but the decision boundary is still constrained.
 - **Luna owns throughput.** Use Luna for clear, narrow, repeatable, or high-volume work.
+- **Delegate by default.** For non-trivial work, Sol should preserve its context by sending eligible bounded execution and exploration to subagents instead of doing that work personally.
 
 Do not route by difficulty alone. Route on two axes:
 
@@ -19,6 +20,48 @@ Do not route by difficulty alone. Route on two axes:
 2. **Context breadth / coupling** — pushes bounded work from Luna toward Terra.
 
 A task touching many files is not automatically a Terra or Sol task. A tiny task with unresolved invariants may still be Sol-owned.
+
+## Delegation-first operating mode
+
+When this skill applies, **subagent delegation is the normal execution path, not an optional optimization**.
+
+Before Sol begins broad repository exploration, lengthy log/test analysis, or bounded implementation, it MUST ask whether that work can be isolated without giving away architectural authority. If yes, delegate it first.
+
+### Mandatory delegation triggers
+
+Delegate unless a direct-work exception below applies when any of these are true:
+
+- understanding the task requires broad code search, call-path tracing, or reading several unfamiliar files;
+- two or more independent evidence questions can be investigated in parallel;
+- a bounded implementation or test task has already-decided behavior and interfaces;
+- logs, traces, docs, or test output can be analyzed outside the primary context;
+- a cross-file change would benefit from an independent bounded pre-review;
+- Sol is about to spend substantial context gathering facts rather than making a decision.
+
+Use **Luna** for narrow leaves. Use **Terra** when the delegated work itself requires broad context integration or synthesis.
+
+When two or more independent read-heavy questions exist, prefer parallel delegation instead of serial investigation in the Sol thread. Keep write parallelism constrained by shared-workspace safety.
+
+### Context firewall
+
+The primary Sol thread should consume **distilled evidence, not exploration exhaust**.
+
+- Do not perform large grep/read/log loops in Sol when a subagent can answer a bounded question.
+- Do not paste raw subagent command logs back into Sol unless needed to arbitrate a disagreement.
+- Ask subagents for conclusions, exact evidence locations, validation, and uncertainty.
+- Sol may open the critical files/diff needed for judgment and final acceptance; it does not need to replay every delegated discovery step.
+
+### Direct-work exceptions
+
+Sol may work directly when:
+
+- the task is genuinely trivial and delegation overhead would exceed the likely context saved;
+- the relevant facts are already fully present in the primary context and no fresh exploration is required;
+- the work is inherently Sol-owned because it requires architecture, unresolved invariants, high-risk judgment, or final integration;
+- subagent routing is unavailable;
+- the user explicitly requests single-agent execution or forbids delegation.
+
+Do **not** use “Sol can do it faster” or “Sol already understands the repo” as sufficient reasons to skip delegation on otherwise eligible non-trivial work.
 
 ## Non-negotiable authority boundaries
 
@@ -31,51 +74,50 @@ A task touching many files is not automatically a Terra or Sol task. A tiny task
 
 ## Model routing
 
-### Luna — narrow and explicit
+### Luna — default leaf model
 
-Prefer `gpt-5.6-luna` when the task is clear, bounded, and locally verifiable.
+Use `gpt-5.6-luna` for clear, bounded, locally verifiable work.
 
-Use **medium** for:
+**Luna uses only `xhigh` or `max` in this skill. Do not use low, medium, or high.**
 
-- code search and symbol lookup;
-- targeted file mapping;
+Use **xhigh by default** for:
+
+- code search, symbol lookup, and targeted file mapping;
 - documentation/API lookup;
 - locating tests, fixtures, config, or call sites;
-- repetitive transformations with an established pattern.
-
-Use **high** for:
-
 - unit tests with already-defined expected behavior;
+- repetitive transformations with an established pattern;
 - type fixes and mechanical refactors;
-- small, explicit features;
+- small explicit features;
 - localized known-root-cause bug fixes;
-- bounded implementation where interfaces and invariants are already decided.
+- bounded implementation where interfaces and invariants are already decided;
+- targeted validation and regression checks.
 
-Use **xhigh/max** only when the task remains narrow and architecture-free but the implementation itself is unusually tricky. Higher effort does not make Luna an architecture agent.
+Use **max** when the task remains narrow and architecture-free but is unusually tricky, requires deeper local reasoning, or a first xhigh attempt was incomplete for reasoning rather than scope reasons.
+
+Higher effort does not make Luna an architecture agent. If the task becomes broad, ambiguous, or decision-heavy, route to Terra or Sol instead of repeatedly increasing Luna scope.
 
 ### Terra — broad but bounded
 
-Prefer `gpt-5.6-terra` when the task needs substantially more context integration than Luna but still does not require root-level architectural authority.
+Use `gpt-5.6-terra` when the delegated task requires materially more context integration than a Luna leaf but still does not require root-level architectural authority.
 
-Use **medium** for:
+**Terra uses `high` or `xhigh` in normal routing. Do not use low or medium. Terra `max` is exceptional and should normally be avoided.**
+
+Use **high by default** for:
 
 - broad codebase exploration;
 - large-file or multi-file review;
 - cross-module call-path mapping;
 - synthesizing several Luna findings into one concise evidence packet;
-- processing supporting docs, logs, traces, or test output.
-
-Use **high** for:
-
-- root-cause debugging across several modules;
-- integration analysis where expected behavior is known;
+- processing supporting docs, logs, traces, or test output;
+- root-cause debugging across several modules when expected behavior is known;
 - bounded code review before Sol's final review;
 - identifying regression risk across a defined subsystem;
-- implementing a context-heavy but already-designed slice.
+- context-heavy but already-designed implementation slices.
 
-Use **xhigh** sparingly for a genuinely difficult bounded subsystem whose architecture, contracts, and correctness model are already fixed by Sol.
+Use **xhigh** for genuinely difficult bounded debugging, review, synthesis, or subsystem implementation whose architecture, contracts, and correctness model are already fixed by Sol.
 
-Avoid **Terra max** by default. If Terra needs max-level reasoning because the work is becoming ambiguous, architectural, or high-risk, escalate to Sol instead.
+**Avoid Terra max.** Use it only when there is a concrete reason xhigh is insufficient while the task remains clearly bounded and non-architectural. In most such cases, escalate to Sol instead.
 
 ### Sol — judgment and correctness boundaries
 
@@ -92,7 +134,7 @@ Keep work with the primary Sol agent when any of these apply:
 - a previous bounded attempt failed because the task was misclassified;
 - the final diff must be integrated and accepted.
 
-Sol may still delegate narrow evidence gathering around a Sol-owned problem.
+Sol may and usually should still delegate narrow evidence gathering around a Sol-owned problem.
 
 ## Native Codex orchestration
 
@@ -182,8 +224,8 @@ A good implementation loop is:
 
 ```text
 Sol decides scope/contracts
-→ Luna implements
-→ Terra pre-reviews if cross-file/context-heavy
+→ Luna xhigh/max implements
+→ Terra high/xhigh pre-reviews if cross-file/context-heavy
 → Luna fixes one bounded review round if needed
 → Sol inspects final diff and validates
 ```
@@ -217,17 +259,21 @@ Keep repo-specific boundaries, commands, conventions, and exceptions in applicab
 
 Sol owns architecture decisions. Terra may analyze their consequences. Luna implements bounded slices after the decisions are fixed.
 
-## Cost discipline
+## Cost and context discipline
 
-Optimize for useful intelligence per unit of context and cost, not for the smallest model at all times.
+Optimize primarily for **Sol context preservation and useful intelligence**, not for minimizing subagent calls.
 
-- Luna is the default leaf model for narrow work.
-- Prefer Luna at higher effort over Terra when the task stays narrow and explicit.
-- Prefer Terra when context breadth, synthesis, or cross-module debugging is the real bottleneck.
+- Luna xhigh is the default leaf execution tier.
+- Luna max is acceptable for demanding narrow work because Luna is the high-volume tier.
+- Terra high is the default broad-context tier; Terra xhigh is the escalation tier.
+- Terra max is outside normal routing and should usually become a Sol escalation instead.
+- Prefer delegation when it quarantines meaningful exploration, execution, or validation context from Sol.
 - Do not use Terra as a mandatory stepping stone between Luna and Sol.
 - Skip directly to Sol when judgment, ambiguity, or correctness risk dominates.
 - Avoid duplicate agents without independent questions.
-- Do not spawn an agent to do work that is cheaper to perform in the already-loaded primary context.
+- Do not spawn an agent for a truly trivial action with negligible context footprint.
+
+The default bias is **delegate eligible work**, not **prove delegation is cheaper first**.
 
 ## Completion
 
@@ -239,6 +285,6 @@ Before completion, Sol must:
 4. confirm architectural and user constraints remain satisfied;
 5. disclose remaining unverified conditions or risks.
 
-When reporting subagent use, summarize only what was delegated, the model class used, material evidence, validation, and remaining risk. Do not dump internal agent chatter.
+When reporting subagent use, summarize only what was delegated, the model class/effort used, material evidence, validation, and remaining risk. Do not dump internal agent chatter.
 
 For recommended Codex `[agents]` defaults and optional native configuration, read `references/codex-native-config.md` only when setup/configuration is relevant.

@@ -9,18 +9,41 @@ Put this in `~/.codex/config.toml` (or adapt it to a trusted project's `.codex/c
 ```toml
 [agents]
 enabled = true
-max_concurrent_threads_per_session = 4
+max_concurrent_threads_per_session = 6
 default_subagent_model = "gpt-5.6-luna"
-default_subagent_reasoning_effort = "medium"
+default_subagent_reasoning_effort = "xhigh"
 ```
 
 Why:
 
-- Luna is the cheapest sensible default leaf model.
-- Terra should normally be selected explicitly when broad context/synthesis is needed.
-- Four concurrent child threads is enough for useful parallelism without encouraging agent swarms. Increase only for genuinely independent read-heavy work.
+- Luna is the default high-volume leaf model and this skill intentionally starts Luna at xhigh.
+- Terra should be selected explicitly when broad context/synthesis is needed, normally at high or xhigh.
+- Six open child threads provide room for read-heavy parallelism without requiring the supervisor to use all six. Normal work should still prefer a small number of independent, useful agents over a swarm.
 
 Explicit spawn values override these defaults.
+
+## Effort policy
+
+Use only these normal combinations:
+
+```text
+Luna xhigh
+→ default narrow exploration / implementation / tests / validation
+
+Luna max
+→ unusually demanding but still narrow and architecture-free work
+
+Terra high
+→ default broad-context exploration / synthesis / debugging / pre-review
+
+Terra xhigh
+→ difficult broad-but-bounded work
+
+Terra max
+→ exceptional; normally escalate to Sol instead
+```
+
+Do not use Luna low/medium/high or Terra low/medium under `sol-supervisor`.
 
 ## Prefer roles over model-specific role files
 
@@ -35,13 +58,13 @@ Use built-in roles where possible:
 Then select model/effort per task:
 
 ```text
-explorer + Luna medium
+explorer + Luna xhigh
 → narrow search / symbol mapping
 
-worker + Luna high
+worker + Luna xhigh/max
 → clear bounded implementation
 
-explorer + Terra medium/high
+explorer + Terra high/xhigh
 → broad or cross-module investigation
 
 worker + Terra high/xhigh
@@ -68,7 +91,20 @@ Return uncertainty explicitly.
 """
 ```
 
-Intentionally omit `model` and `model_reasoning_effort`. The parent can spawn this role with Terra high for broad review, Luna high for narrow factual checking, or another explicit choice later without duplicating role files.
+Intentionally omit `model` and `model_reasoning_effort`. The parent should normally spawn this role with Terra high/xhigh, or Luna xhigh for a narrow factual check, without duplicating role files.
+
+## Always-on delegation reinforcement
+
+If implicit skill invocation is not reliable enough in a particular setup, add a short rule to the applicable `AGENTS.md` rather than duplicating the whole skill:
+
+```text
+When sol-supervisor applies, proactively delegate eligible bounded exploration,
+implementation, testing, and review to subagents before consuming substantial
+primary-agent context. Keep Sol focused on decisions, integration, and final acceptance.
+Use Luna at xhigh/max and Terra at high/xhigh; avoid Terra max.
+```
+
+This is intentionally short. The skill remains the detailed routing policy.
 
 ## Sandbox precedence caveat
 

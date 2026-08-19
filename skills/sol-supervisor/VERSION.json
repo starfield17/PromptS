@@ -1,11 +1,16 @@
 {
   "name": "sol-supervisor",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "models": {
     "primary": "GPT-5.6 Sol",
     "bounded_synthesis": "gpt-5.6-terra",
     "throughput_leaf": "gpt-5.6-luna"
   },
-  "routing_principle": "Sol owns decisions; Terra owns bounded synthesis; Luna owns throughput.",
-  "generated": "2026-08-19"
+  "reasoning_policy": {
+    "luna": ["xhigh", "max"],
+    "terra": ["high", "xhigh"],
+    "terra_max": "exceptional; normally escalate to Sol"
+  },
+  "routing_principle": "Delegate eligible work by default. Sol owns decisions; Terra owns bounded synthesis; Luna owns throughput.",
+  "generated": "2026-08-20"
 }
