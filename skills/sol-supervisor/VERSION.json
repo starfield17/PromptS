@@ -1,0 +1,11 @@
+{
+  "name": "sol-supervisor",
+  "version": "2.0.0",
+  "models": {
+    "primary": "GPT-5.6 Sol",
+    "bounded_synthesis": "gpt-5.6-terra",
+    "throughput_leaf": "gpt-5.6-luna"
+  },
+  "routing_principle": "Sol owns decisions; Terra owns bounded synthesis; Luna owns throughput.",
+  "generated": "2026-08-19"
+}

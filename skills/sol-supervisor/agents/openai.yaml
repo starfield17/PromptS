@@ -1,0 +1,7 @@
+interface:
+  display_name: "Sol Supervisor"
+  short_description: "Sol decides; Terra synthesizes; Luna executes"
+  default_prompt: "Use $sol-supervisor to supervise this coding task and route bounded work to Terra or Luna when useful."
+
+policy:
+  allow_implicit_invocation: true

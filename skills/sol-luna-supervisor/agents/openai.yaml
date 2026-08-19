@@ -1,7 +1,0 @@
-interface:
-  display_name: "Sol–Luna Supervisor"
-  short_description: "Sol reviews; Luna performs bounded coding work"
-  default_prompt: "Use $sol-luna-supervisor to route this coding task between the primary Sol agent and Luna subagents."
-
-policy:
-  allow_implicit_invocation: true
