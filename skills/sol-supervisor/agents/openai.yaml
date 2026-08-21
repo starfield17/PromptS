@@ -1,7 +1,7 @@
 interface:
   display_name: "Sol Supervisor"
-  short_description: "Sol decides; Terra synthesizes; Luna executes"
-  default_prompt: "Use $sol-supervisor for this coding task. Proactively delegate eligible bounded exploration, implementation, testing, and pre-review so Sol preserves context for decisions, integration, and final acceptance. Use Luna at xhigh/max and Terra at high/xhigh; avoid Terra max."
+  short_description: "Route first; Sol decides, Terra synthesizes, Luna executes/OCRs"
+  default_prompt: "Use $sol-supervisor and follow its mandatory workflow loop: ROUTE -> DELEGATE -> WAIT -> SOL DECIDE -> EXECUTE -> VERIFY/REVIEW -> SOL ACCEPT. Do not skip routing or silently take delegated work back into Sol. Preserve Sol context by proactively using Luna xhigh/max for narrow work, validation, and visual OCR/transcription; use Terra high/xhigh for broad bounded synthesis/debugging/review; avoid Terra max."
 
 policy:
   allow_implicit_invocation: true
