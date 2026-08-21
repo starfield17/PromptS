@@ -1,0 +1,7 @@
+interface:
+  display_name: "Sol Supervisor"
+  short_description: "Route by value and capability; Sol judges, Terra synthesizes, Luna executes"
+  default_prompt: "Use $sol-supervisor. Route by ambiguity, breadth, coupling, parallelism, and capability floor. Delegation is optional and must have positive value: never create child work merely to satisfy process. Use DIRECT, SCOUT, PARALLEL, and PIPELINE as reusable execution patterns; run dependency-ready work instead of waiting by phase. Preserve Luna xhigh/max and Terra high/xhigh. Keep high-entropy diagnosis, unresolved judgment, subtle semantic review, integration, and final acceptance with Sol. Protect Sol from noise, not from critical semantic context."
+
+policy:
+  allow_implicit_invocation: true
