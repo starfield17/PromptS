@@ -1,8 +1,0 @@
-LICENSE
-README.md
-SKILL.md
-SOURCE.md
-manifest.txt
-scripts/validate.py
-upstream/grill-me/SKILL.md
-upstream/grilling/SKILL.md
