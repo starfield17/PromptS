@@ -1,0 +1,6 @@
+interface:
+  display_name: "Concept Tutor"
+  short_description: "Connect formal concepts with familiar examples, build judgment rules, and transfer them to the next learning problem"
+
+policy:
+  allow_implicit_invocation: true

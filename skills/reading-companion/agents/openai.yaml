@@ -1,0 +1,6 @@
+interface:
+  display_name: "Reading Companion"
+  short_description: "Explain the context, references, and emotions of English passages, reducing comprehension barriers and maintaining reading continuity"
+
+policy:
+  allow_implicit_invocation: true

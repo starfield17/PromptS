@@ -1,0 +1,6 @@
+interface:
+  display_name: "Chemistry Research"
+  short_description: "Compare chemical research routes based on literature and mechanisms, evaluating selectivity, experimental conditions, and scope of application"
+
+policy:
+  allow_implicit_invocation: true

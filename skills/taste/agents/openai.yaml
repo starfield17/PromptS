@@ -1,0 +1,6 @@
+interface:
+  display_name: "Default Taste"
+  short_description: "Default preference for natural expression, complete content, and moderate complexity for daily conversation, writing, and engineering"
+
+policy:
+  allow_implicit_invocation: true

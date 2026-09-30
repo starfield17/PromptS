@@ -1,0 +1,6 @@
+interface:
+  display_name: "Language Practice"
+  short_description: "Through round-by-round practice, brief corrections, and changing scenarios, language structures gradually become natural responses"
+
+policy:
+  allow_implicit_invocation: true

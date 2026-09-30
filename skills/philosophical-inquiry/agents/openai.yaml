@@ -1,0 +1,6 @@
+interface:
+  display_name: "Philosophical Discussion"
+  short_description: "Clarify concepts and tensions in philosophical questions, and examine arguments, opposing positions, and structural explanations"
+
+policy:
+  allow_implicit_invocation: true

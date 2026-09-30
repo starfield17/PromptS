@@ -1,0 +1,6 @@
+interface:
+  display_name: "Plan Review"
+  short_description: "Review key assumptions, alternative paths, and complexity of engineering plans, and establish verifiable success criteria"
+
+policy:
+  allow_implicit_invocation: true
